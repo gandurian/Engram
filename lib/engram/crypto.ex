@@ -19,18 +19,28 @@ defmodule Engram.Crypto do
   def ensure_user_dek(%User{encrypted_dek: blob} = user) when is_binary(blob), do: {:ok, user}
 
   def ensure_user_dek(%User{} = user) do
-    provider = Resolver.provider_for(user.id)
-    dek = provider.generate_dek()
+    # The in-memory struct has no DEK, but the DB might already have one from
+    # an earlier write that the caller's struct didn't pick up. Reload before
+    # generating — without this, every caller holding a stale user struct
+    # silently rotates the DEK and corrupts every existing ciphertext.
+    case Accounts.get_user(user.id) do
+      %User{encrypted_dek: blob} = reloaded when is_binary(blob) ->
+        {:ok, reloaded}
 
-    with {:ok, wrapped} <- provider.wrap_dek(dek, %{user_id: user.id}),
-         {:ok, user} <-
-           Accounts.update_user_encryption(user, %{
-             encrypted_dek: wrapped,
-             dek_version: 1,
-             key_provider: Atom.to_string(provider.name())
-           }) do
-      DekCache.put(user.id, dek)
-      {:ok, user}
+      _ ->
+        provider = Resolver.provider_for(user.id)
+        dek = provider.generate_dek()
+
+        with {:ok, wrapped} <- provider.wrap_dek(dek, %{user_id: user.id}),
+             {:ok, user} <-
+               Accounts.update_user_encryption(user, %{
+                 encrypted_dek: wrapped,
+                 dek_version: 1,
+                 key_provider: Atom.to_string(provider.name())
+               }) do
+          DekCache.put(user.id, dek)
+          {:ok, user}
+        end
     end
   end
 
@@ -96,21 +106,97 @@ defmodule Engram.Crypto do
   end
 
   @doc """
-  If note has ciphertext columns populated, decrypt them into `content`/`title`/`tags`.
-  Otherwise return the note unchanged.
+  If note has ciphertext columns populated, decrypt them into the matching
+  plaintext virtual fields. Phase 4 ciphertext (`content` / `title` / `tags`)
+  and Phase B ciphertext (`path` / `folder`) are decrypted independently — a
+  note can have one set populated and not the other (e.g., legacy unencrypted
+  vault that has been B.1-backfilled but not Phase 4-encrypted).
+
+  Returns `{:ok, note}` unchanged when no ciphertext is present.
   """
   @spec maybe_decrypt_note_fields(Engram.Notes.Note.t(), User.t()) ::
           {:ok, Engram.Notes.Note.t()} | {:error, term()}
-  def maybe_decrypt_note_fields(%Engram.Notes.Note{content_ciphertext: nil} = note, _user),
+  def maybe_decrypt_note_fields(%Engram.Notes.Note{} = note, %User{} = user) do
+    if needs_note_decrypt?(note) do
+      with {:ok, dek} <- get_dek(user),
+           {:ok, note} <- decrypt_phase_4_note_fields(note, dek),
+           {:ok, note} <- decrypt_phase_b_note_fields(note, dek) do
+        {:ok, note}
+      end
+    else
+      {:ok, note}
+    end
+  end
+
+  defp needs_note_decrypt?(%Engram.Notes.Note{} = note),
+    do: not is_nil(note.content_ciphertext) or not is_nil(note.path_ciphertext)
+
+  defp decrypt_phase_4_note_fields(%Engram.Notes.Note{content_ciphertext: nil} = note, _dek),
     do: {:ok, note}
 
-  def maybe_decrypt_note_fields(%Engram.Notes.Note{} = note, %User{} = user) do
-    with {:ok, dek} <- get_dek(user),
-         {:ok, content} <- Envelope.decrypt(note.content_ciphertext, note.content_nonce, dek),
+  defp decrypt_phase_4_note_fields(%Engram.Notes.Note{} = note, dek) do
+    with {:ok, content} <- Envelope.decrypt(note.content_ciphertext, note.content_nonce, dek),
          {:ok, title} <- Envelope.decrypt(note.title_ciphertext, note.title_nonce, dek),
          {:ok, tags_bin} <- Envelope.decrypt(note.tags_ciphertext, note.tags_nonce, dek) do
       tags = :erlang.binary_to_term(tags_bin, [:safe])
       {:ok, %{note | content: content, title: title, tags: tags}}
+    else
+      :error -> {:error, :decrypt_failed}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp decrypt_phase_b_note_fields(%Engram.Notes.Note{path_ciphertext: nil} = note, _dek),
+    do: {:ok, note}
+
+  defp decrypt_phase_b_note_fields(%Engram.Notes.Note{} = note, dek) do
+    with {:ok, path} <- Envelope.decrypt(note.path_ciphertext, note.path_nonce, dek),
+         {:ok, folder} <- Envelope.decrypt(note.folder_ciphertext, note.folder_nonce, dek) do
+      {:ok, %{note | path: path, folder: folder}}
+    else
+      :error -> {:error, :decrypt_failed}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Decrypts the Phase B `path_ciphertext` on an attachment into the virtual
+  `path` field. No-op when ciphertext is nil (legacy pre-B.1 row).
+  """
+  @spec maybe_decrypt_attachment_fields(Engram.Attachments.Attachment.t(), User.t()) ::
+          {:ok, Engram.Attachments.Attachment.t()} | {:error, term()}
+  def maybe_decrypt_attachment_fields(
+        %Engram.Attachments.Attachment{path_ciphertext: nil} = att,
+        _user
+      ),
+      do: {:ok, att}
+
+  def maybe_decrypt_attachment_fields(
+        %Engram.Attachments.Attachment{} = att,
+        %User{} = user
+      ) do
+    with {:ok, dek} <- get_dek(user),
+         {:ok, path} <- Envelope.decrypt(att.path_ciphertext, att.path_nonce, dek) do
+      {:ok, %{att | path: path}}
+    else
+      :error -> {:error, :decrypt_failed}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Decrypts `name_ciphertext` on a vault into the virtual `name` field.
+  No-op when ciphertext is nil (legacy pre-B.1 row).
+  """
+  @spec maybe_decrypt_vault_fields(Engram.Vaults.Vault.t(), User.t()) ::
+          {:ok, Engram.Vaults.Vault.t()} | {:error, term()}
+  def maybe_decrypt_vault_fields(%Engram.Vaults.Vault{name_ciphertext: nil} = vault, _user),
+    do: {:ok, vault}
+
+  def maybe_decrypt_vault_fields(%Engram.Vaults.Vault{} = vault, %User{} = user) do
+    with {:ok, dek} <- get_dek(user),
+         {:ok, name} <- Envelope.decrypt(vault.name_ciphertext, vault.name_nonce, dek) do
+      {:ok, %{vault | name: name}}
     else
       :error -> {:error, :decrypt_failed}
       {:error, _} = err -> err

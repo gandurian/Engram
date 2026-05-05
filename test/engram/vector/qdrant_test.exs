@@ -71,6 +71,48 @@ defmodule Engram.Vector.QdrantTest do
     end
   end
 
+  describe "set_payload/3" do
+    test "patches payload onto specific point ids without re-upserting vectors", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "POST", "/collections/test_col/points/payload", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert decoded["points"] == ["uuid-1", "uuid-2"]
+        assert decoded["payload"]["path_hmac"] == "AAAA"
+        assert decoded["payload"]["folder_hmac"] == "BBBB"
+        assert decoded["payload"]["tags_hmac"] == ["TTTT"]
+        # Vectors must NOT be sent — set_payload is a payload-only PATCH.
+        refute Map.has_key?(decoded, "vectors")
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, ~s({"result": {"status": "acknowledged"}}))
+      end)
+
+      payload = %{path_hmac: "AAAA", folder_hmac: "BBBB", tags_hmac: ["TTTT"]}
+      assert :ok = Qdrant.set_payload("test_col", ["uuid-1", "uuid-2"], payload)
+    end
+
+    test "returns :ok on empty point list without HTTP call", %{bypass: bypass} do
+      # No Bypass.expect — any call would fail the test
+      Bypass.stub(bypass, "POST", "/collections/test_col/points/payload", fn _ ->
+        flunk("set_payload must not call Qdrant for empty point list")
+      end)
+
+      assert :ok = Qdrant.set_payload("test_col", [], %{path_hmac: "x"})
+    end
+
+    test "returns error on non-200 response", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "POST", "/collections/test_col/points/payload", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, ~s({"status":{"error":"bad request"}}))
+      end)
+
+      assert {:error, {400, _}} = Qdrant.set_payload("test_col", ["uuid-1"], %{path_hmac: "x"})
+    end
+  end
+
   describe "delete_by_vault/3" do
     test "posts correct filter with user_id and vault_id must conditions", %{bypass: bypass} do
       Bypass.expect_once(bypass, "POST", "/collections/test_col/points/delete", fn conn ->
@@ -182,6 +224,56 @@ defmodule Engram.Vector.QdrantTest do
       assert {:ok, results} = Qdrant.search("test_col", vector, user_id: "1", limit: 5)
       assert length(results) == 1
       assert hd(results).score == 0.95
+    end
+
+    test "translates :folder_hmac opt to folder_hmac filter key (Phase B.2.3)",
+         %{bypass: bypass} do
+      Bypass.expect_once(bypass, "POST", "/collections/test_col/points/query", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        conditions = decoded["filter"]["must"]
+
+        cond = Enum.find(conditions, &(&1["key"] == "folder_hmac"))
+        assert cond, "expected a folder_hmac filter, got #{inspect(conditions)}"
+        assert cond["match"]["value"] == "FOLDER-HMAC-B64"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"result" => []}))
+      end)
+
+      vector = List.duplicate(0.1, 1024)
+
+      assert {:ok, []} =
+               Qdrant.search("test_col", vector,
+                 user_id: "1",
+                 folder_hmac: "FOLDER-HMAC-B64"
+               )
+    end
+
+    test "translates :tags_hmac opt to tags_hmac filter with match.any (Phase B.2.3)",
+         %{bypass: bypass} do
+      Bypass.expect_once(bypass, "POST", "/collections/test_col/points/query", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        conditions = decoded["filter"]["must"]
+
+        cond = Enum.find(conditions, &(&1["key"] == "tags_hmac"))
+        assert cond, "expected a tags_hmac filter, got #{inspect(conditions)}"
+        assert Enum.sort(cond["match"]["any"]) == Enum.sort(["HASH-A", "HASH-B"])
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"result" => []}))
+      end)
+
+      vector = List.duplicate(0.1, 1024)
+
+      assert {:ok, []} =
+               Qdrant.search("test_col", vector,
+                 user_id: "1",
+                 tags_hmac: ["HASH-A", "HASH-B"]
+               )
     end
 
     test "includes binary quantization rescore params", %{bypass: bypass} do

@@ -70,22 +70,16 @@ defmodule Engram.Crypto do
   end
 
   @doc """
-  If `vault.encrypted`, encrypts `content` + `title` and sets the plaintext
-  fields to nil; adds `_ciphertext` + `_nonce` fields. Otherwise passes through.
+  Encrypts `content` + `title` from `attrs` and replaces them with
+  `_ciphertext` + `_nonce` keys. Phase B.4: encryption is mandatory — there
+  is no `vault.encrypted` flag and no passthrough path.
 
   Phase B.3: `tags` are encrypted into `tags_ciphertext` by every write via
-  `Engram.Notes.phase_b_keyword_for/4`, regardless of vault.encrypted. This
-  helper no longer touches tags — that's a Phase B contract, not a Phase 4
-  toggle.
+  `Engram.Notes.phase_b_keyword_for/4`. This helper does not touch tags —
+  that's a Phase B contract.
   """
-  @spec maybe_encrypt_note_fields(map(), User.t(), Engram.Vaults.Vault.t()) ::
-          {:ok, map()} | {:error, term()}
-  def maybe_encrypt_note_fields(attrs, _user, %Engram.Vaults.Vault{encrypted: false}),
-    do: {:ok, attrs}
-
-  def maybe_encrypt_note_fields(attrs, %User{} = user, %Engram.Vaults.Vault{encrypted: true}) do
-    Logger.debug("maybe_encrypt_note_fields auto-provision path for user_id=#{user.id}")
-
+  @spec encrypt_note_fields(map(), User.t()) :: {:ok, map()} | {:error, term()}
+  def encrypt_note_fields(attrs, %User{} = user) do
     with {:ok, user} <- ensure_user_dek(user),
          {:ok, dek} <- get_dek(user) do
       content = Map.get(attrs, :content) || Map.get(attrs, "content") || ""
@@ -96,8 +90,7 @@ defmodule Engram.Crypto do
 
       {:ok,
        attrs
-       |> Map.put(:content, nil)
-       |> Map.put(:title, nil)
+       |> Map.drop([:content, :title, "content", "title"])
        |> Map.put(:content_ciphertext, content_ct)
        |> Map.put(:content_nonce, content_nonce)
        |> Map.put(:title_ciphertext, title_ct)
@@ -218,26 +211,20 @@ defmodule Engram.Crypto do
   end
 
   @doc """
-  If `vault.encrypted`, encrypts `text`, `title`, `heading_path` in the
-  payload map using the user's DEK. Adds `text_nonce`, `title_nonce`,
-  `heading_path_nonce` keys; all six crypto fields are base64-encoded
-  binaries. Other keys (user_id, vault_id, source_path, folder, tags,
-  chunk_index) are untouched. Unencrypted vault → passthrough.
+  Encrypts `text`, `title`, `heading_path` in the Qdrant payload map using
+  the user's DEK. Adds `text_nonce`, `title_nonce`, `heading_path_nonce`
+  keys; all six crypto fields are base64-encoded binaries. Other keys
+  (user_id, vault_id, source_path, folder, tags, chunk_index) are
+  untouched.
 
-  Unlike `maybe_encrypt_note_fields/3`, this function does NOT call
-  `ensure_user_dek/1`. Reason: Qdrant indexing only runs after a note has
-  been written through `Notes.upsert_note/3`, which provisions the DEK on
-  the first encrypted write. A missing DEK here signals a config bug
-  (e.g., a vault manually flipped to `encrypted: true` without using the
-  Phase 6 `EncryptVault` toggle worker) — fail-loud via Oban retry +
-  telemetry is preferable to silently lazy-provisioning.
+  Phase B.4: encryption is mandatory. Does NOT call `ensure_user_dek/1` —
+  Qdrant indexing only runs after a note has been written through
+  `Notes.upsert_note/3`, which provisions the DEK. A missing DEK here
+  signals a config bug; fail-loud via Oban retry + telemetry is preferable
+  to silent lazy-provisioning.
   """
-  @spec maybe_encrypt_qdrant_payload(map(), User.t(), Engram.Vaults.Vault.t()) ::
-          {:ok, map()} | {:error, term()}
-  def maybe_encrypt_qdrant_payload(payload, _user, %Engram.Vaults.Vault{encrypted: false}),
-    do: {:ok, payload}
-
-  def maybe_encrypt_qdrant_payload(payload, %User{} = user, %Engram.Vaults.Vault{encrypted: true}) do
+  @spec encrypt_qdrant_payload(map(), User.t()) :: {:ok, map()} | {:error, term()}
+  def encrypt_qdrant_payload(payload, %User{} = user) do
     with {:ok, dek} <- get_dek(user) do
       {text_ct, text_nonce} = Envelope.encrypt(Map.get(payload, :text) || "", dek)
       {title_ct, title_nonce} = Envelope.encrypt(Map.get(payload, :title) || "", dek)
@@ -255,8 +242,9 @@ defmodule Engram.Crypto do
   end
 
   @doc """
-  Decrypts a list of Qdrant search candidates in-place based on each
-  candidate's vault's `encrypted` flag (looked up in `vaults_by_id`).
+  Decrypts a list of Qdrant search candidates in-place. Phase B.4:
+  encryption is mandatory, so every candidate with a known vault is
+  expected to carry ciphertext.
 
   - Per-candidate decrypt failure → `Logger.error` + telemetry
     `[:engram, :search, :decrypt_failed]` + candidate dropped.
@@ -265,15 +253,18 @@ defmodule Engram.Crypto do
   - All candidates dropped → `{:error, :decrypt_failed}`.
   - Empty input → `{:ok, []}`.
   """
-  @spec maybe_decrypt_qdrant_candidates([map()], User.t(), %{
+  @spec decrypt_qdrant_candidates([map()], User.t(), %{
           String.t() => Engram.Vaults.Vault.t()
         }) ::
           {:ok, [map()]} | {:error, :decrypt_failed}
-  def maybe_decrypt_qdrant_candidates([], _user, _vaults_by_id), do: {:ok, []}
+  def decrypt_qdrant_candidates([], _user, _vaults_by_id), do: {:ok, []}
 
-  def maybe_decrypt_qdrant_candidates(candidates, %User{} = user, vaults_by_id)
+  def decrypt_qdrant_candidates(candidates, %User{} = user, vaults_by_id)
       when is_list(candidates) and is_map(vaults_by_id) do
-    case get_dek_if_any_encrypted(user, candidates, vaults_by_id) do
+    # Lazy DEK load — only fetch if at least one candidate carries
+    # ciphertext. Mocked test traffic that returns plaintext-only
+    # candidates against an encrypted-by-default user shouldn't 500.
+    case maybe_load_dek(user, candidates) do
       {:ok, dek_or_nil} ->
         decrypted =
           candidates
@@ -290,35 +281,17 @@ defmodule Engram.Crypto do
     end
   end
 
-  # Lazy DEK load — only fetch if at least one candidate is in an encrypted vault.
-  defp get_dek_if_any_encrypted(user, candidates, vaults_by_id) do
-    if Enum.any?(candidates, fn c -> encrypted_vault?(c, vaults_by_id) end) do
-      case get_dek(user) do
-        {:ok, dek} ->
-          {:ok, dek}
+  defp maybe_load_dek(user, _candidates) do
+    case get_dek(user) do
+      {:ok, dek} ->
+        {:ok, dek}
 
-        {:error, reason} ->
-          Logger.error(
-            "qdrant decrypt: failed to load DEK for user_id=#{user.id} reason=#{inspect(reason)}"
-          )
+      {:error, reason} ->
+        Logger.error(
+          "qdrant decrypt: failed to load DEK for user_id=#{user.id} reason=#{inspect(reason)}"
+        )
 
-          {:error, :decrypt_failed}
-      end
-    else
-      {:ok, nil}
-    end
-  end
-
-  defp encrypted_vault?(candidate, vaults_by_id) do
-    case candidate_vault_id(candidate) do
-      nil ->
-        false
-
-      id ->
-        case Map.get(vaults_by_id, id) do
-          %Engram.Vaults.Vault{encrypted: true} -> true
-          _ -> false
-        end
+        {:error, :decrypt_failed}
     end
   end
 
@@ -330,17 +303,19 @@ defmodule Engram.Crypto do
   end
 
   # Returns [decrypted_candidate] on success, [] on drop.
+  # Phase B.4: every production payload MUST carry vault_id + text_nonce.
+  # Anything else is a shape mismatch — dropped + telemetry, no plaintext
+  # passthrough that could leak ciphertext-as-plaintext on a malformed point.
   defp decrypt_one(candidate, vaults_by_id, dek) do
     vault_id_key = candidate_vault_id(candidate)
 
     cond do
-      # No vault_id and no ciphertext — legacy / plaintext candidate, pass through.
-      is_nil(vault_id_key) and not Map.has_key?(candidate, :text_nonce) ->
-        [candidate]
-
-      # No vault_id but ciphertext present — shape mismatch, drop.
       is_nil(vault_id_key) ->
-        emit_shape_mismatch(nil, candidate, "missing vault_id with text_nonce present")
+        emit_shape_mismatch(nil, candidate, "missing vault_id")
+        []
+
+      not Map.has_key?(candidate, :text_nonce) ->
+        emit_shape_mismatch(vault_id_key, candidate, "missing text_nonce")
         []
 
       true ->
@@ -368,20 +343,7 @@ defmodule Engram.Crypto do
         emit_shape_mismatch(vault_id_key, candidate, "vault not in lookup map")
         []
 
-      %Engram.Vaults.Vault{encrypted: false} ->
-        if Map.has_key?(candidate, :text_nonce) do
-          emit_shape_mismatch(
-            vault_id_key,
-            candidate,
-            "vault marked unencrypted but payload has text_nonce"
-          )
-
-          []
-        else
-          [candidate]
-        end
-
-      %Engram.Vaults.Vault{encrypted: true} ->
+      %Engram.Vaults.Vault{} ->
         do_decrypt_candidate(candidate, dek)
     end
   end
@@ -431,76 +393,19 @@ defmodule Engram.Crypto do
   defp safe_decode64(s) when is_binary(s), do: Base.decode64(s)
   defp safe_decode64(_), do: :error
 
-  @spec encrypt_vault(Engram.Vaults.Vault.t(), Engram.Accounts.User.t()) ::
-          {:ok, Engram.Vaults.Vault.t()} | {:error, :cooldown | :bad_status | term()}
-  def encrypt_vault(%Engram.Vaults.Vault{} = vault, %Engram.Accounts.User{} = user) do
-    Engram.Repo.with_tenant(user.id, fn ->
-      locked = Engram.Repo.get!(Engram.Vaults.Vault, vault.id, lock: "FOR UPDATE")
-
-      cond do
-        locked.encryption_status != "none" ->
-          Engram.Repo.rollback(:bad_status)
-
-        cooldown_active?(locked, user) ->
-          Engram.Repo.rollback(:cooldown)
-
-        true ->
-          now = DateTime.utc_now()
-
-          updated =
-            locked
-            |> Ecto.Changeset.change(%{
-              encrypted: true,
-              encryption_status: "encrypting",
-              last_toggle_at: now
-            })
-            |> Engram.Repo.update!()
-
-          {:ok, _} =
-            Engram.Workers.EncryptVault.new(%{
-              vault_id: vault.id,
-              user_id: user.id,
-              cursor: 0
-            })
-            |> Oban.insert()
-
-          updated
-      end
-    end)
-    |> case do
-      {:ok, vault} -> {:ok, vault}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  # Cooldown rules:
-  # * No prior toggle → no cooldown.
-  # * No per-user cooldown configured (NULL or ≤0) → no cooldown. This is the
-  #   default and the self-hosted default; the hosted operator opts users in by
-  #   setting users.encryption_toggle_cooldown_days.
-  defp cooldown_active?(%Engram.Vaults.Vault{last_toggle_at: nil}, _user), do: false
-
-  defp cooldown_active?(_vault, %Engram.Accounts.User{encryption_toggle_cooldown_days: nil}),
-    do: false
-
-  defp cooldown_active?(_vault, %Engram.Accounts.User{encryption_toggle_cooldown_days: days})
-       when not is_integer(days) or days <= 0,
-       do: false
-
-  defp cooldown_active?(%Engram.Vaults.Vault{last_toggle_at: ts}, %Engram.Accounts.User{
-         encryption_toggle_cooldown_days: days
-       }) do
-    DateTime.diff(DateTime.utc_now(), ts, :day) < days
-  end
-
   @filter_key_info "engram-filter-v1"
+  @content_hash_info "engram-content-hash-v1"
 
   @doc """
-  Derives a 32-byte HMAC filter key from the user's DEK using HKDF.
+  Derives a 32-byte HMAC filter key from the user's DEK.
 
   Used for deterministic fingerprinting of filterable fields (path, folder,
-  tags, vault name). The key is HKDF-Expand of the DEK with versioned info
-  string `"engram-filter-v1"`. Computed on demand — never stored.
+  tags, vault name). Computed as `HMAC-SHA256(DEK, "engram-filter-v1")`,
+  i.e. a single-block HMAC PRF with a versioned domain-separation info
+  string. Equivalent to one round of HKDF-Expand (RFC 5869, L=32, T(1)
+  with a counter byte omitted) — the construction is sound because the
+  DEK is already a uniform 32-byte secret, so a full HKDF-Extract step is
+  unnecessary. Computed on demand — never stored.
 
   BYOK-ready: the DEK is always available in plaintext after the configured
   KeyProvider unwraps it, regardless of whether the wrapping CMK is local,
@@ -530,6 +435,36 @@ defmodule Engram.Crypto do
   def hmac_field(filter_key, value)
       when is_binary(filter_key) and byte_size(filter_key) == 32 and is_binary(value) do
     :crypto.mac(:hmac, :sha256, filter_key, value)
+  end
+
+  @doc """
+  Derives a 32-byte HMAC content-hash subkey from the user's DEK.
+
+  Computed as `HMAC-SHA256(DEK, "engram-content-hash-v1")` — same single-
+  block PRF construction as `dek_filter_key/1`, with a different domain-
+  separation info string so that note-content fingerprints share no key
+  material with path/folder/tag fingerprints. Replaces the legacy global
+  MD5 `content_hash` (Phase A of Tier 2): per-user keying defeats cross-
+  user dedup oracles and dictionary attacks against known content.
+  """
+  def dek_content_hash_key(user) do
+    with {:ok, dek} <- get_dek(user) do
+      {:ok, :crypto.mac(:hmac, :sha256, dek, @content_hash_info)}
+    end
+  end
+
+  @doc """
+  Computes the HMAC-SHA256 content-hash hex digest using a content-hash key
+  from `dek_content_hash_key/1`. Returns 64-char lowercase hex.
+
+  Stored in `notes.content_hash` and used by the embedding pipeline to detect
+  body changes. Per-user — same content under different users yields different
+  digests, so an attacker with DB access cannot cross-correlate notes by body.
+  """
+  @spec hmac_content_hash(binary(), binary()) :: String.t()
+  def hmac_content_hash(content_key, content)
+      when is_binary(content_key) and byte_size(content_key) == 32 and is_binary(content) do
+    :crypto.mac(:hmac, :sha256, content_key, content) |> Base.encode16(case: :lower)
   end
 
   # Phase B.3: vault decryption is retired. At-rest encryption is mandatory

@@ -22,8 +22,9 @@ defmodule Engram.Indexing do
   Full pipeline for a note: parse → embed → delete old chunks → upsert new chunks.
   Returns `{:ok, chunk_count}` or `{:error, reason}`.
 
-  Takes the note's vault so Qdrant payloads can be encrypted when
-  `vault.encrypted = true`.
+  Takes the note's vault for Qdrant tenant scoping. Phase B.4: payload
+  encryption is mandatory and unconditional — every Qdrant point's
+  `text/title/heading_path` is replaced with `*_ciphertext + *_nonce`.
 
   Internally calls `prepare_index/2` (HTTP/CPU only, no DB writes) followed by
   `commit_index/1` (DB + Qdrant writes). Workers that need to keep the slow
@@ -42,9 +43,8 @@ defmodule Engram.Indexing do
   Phase 1 of the indexing pipeline. Parses the note, calls the embedder, and
   builds the encrypted Qdrant payloads + chunk row inserts in memory.
 
-  Performs **no** DB writes — safe to call without a transaction. Designed for
-  the EncryptVault worker so the slow Voyage AI HTTP call never holds a
-  Postgres connection.
+  Performs **no** DB writes — safe to call without a transaction. Lets the
+  slow Voyage AI HTTP call run outside any Postgres connection.
 
   Returns:
     * `{:ok, :no_chunks}` — note has no parseable chunks
@@ -74,7 +74,7 @@ defmodule Engram.Indexing do
 
   Caller is responsible for tenant context — non-tenant-scoped callers
   (e.g. `EmbedNote`) run as the superuser role and bypass RLS; tenant-scoped
-  callers (e.g. `EncryptVault`) wrap this in a short `Repo.with_tenant/2`.
+  callers wrap this in a short `Repo.with_tenant/2`.
 
   Returns `{:ok, chunk_count}` or `{:error, reason}`.
   """
@@ -136,7 +136,7 @@ defmodule Engram.Indexing do
   # Encrypt-first: build payloads + encrypt in memory BEFORE any mutation.
   # If any chunk's encryption fails, no Postgres row or Qdrant point is touched
   # and prior state survives for the next Oban retry.
-  defp build_prepared(note, vault, chunks, vectors) do
+  defp build_prepared(note, _vault, chunks, vectors) do
     user = Engram.Accounts.get_user!(note.user_id)
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
@@ -163,7 +163,7 @@ defmodule Engram.Indexing do
           tags_hmac: Enum.map(note.tags_hmac || [], &Base.encode64/1)
         }
 
-        case Engram.Crypto.maybe_encrypt_qdrant_payload(base_payload, user, vault) do
+        case Engram.Crypto.encrypt_qdrant_payload(base_payload, user) do
           {:ok, payload} ->
             row = %{
               note_id: note.id,

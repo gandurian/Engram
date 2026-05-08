@@ -15,7 +15,7 @@ defmodule Engram.Application do
       [
         EngramWeb.Telemetry,
         Engram.Repo,
-        boot_canary_task(),
+        boot_canary_guard(),
         {DNSCluster, query: Application.get_env(:engram, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Engram.PubSub},
         EngramWeb.Presence,
@@ -26,10 +26,24 @@ defmodule Engram.Application do
       ]
       |> Enum.reject(&is_nil/1)
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Engram.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # T3-audit C2 — runs BootCanary.verify!/0 synchronously in a GenServer's
+  # init/1, AFTER Engram.Repo has started (it queries `system_canaries`).
+  # An init/1 raise → start_link returns {:error, _} → supervisor's
+  # start_link fails → Application.start/2 fails → VM exits non-zero. True
+  # fail-loud. The prior `Task.start_link` wiring returned {:ok, pid}
+  # synchronously and lost the eventual raise to `:temporary`.
+  defp boot_canary_guard do
+    if Application.get_env(:engram, :boot_canary_enabled, true) do
+      %{
+        id: :engram_boot_canary_guard,
+        start: {Engram.Crypto.BootCanaryGuard, :start_link, []},
+        restart: :temporary
+      }
+    end
   end
 
   defp install_log_redaction_filter do
@@ -42,25 +56,6 @@ defmodule Engram.Application do
         :engram_redact,
         {&Engram.Logger.RedactFilter.filter/2, []}
       )
-  end
-
-  # T3.5.5 / M3 — boot canary verification. Runs immediately after Repo
-  # comes up. A transient task that exits 0 on success and crashes the
-  # supervisor on failure (which crashes the application start, so the
-  # node fails loudly on a wrong master key). Skipped in :test where
-  # the canary table is per-sandbox; tests cover BootCanary directly.
-  # Restart `:temporary` so a verify!/0 raise propagates immediately to
-  # `Application.start/2` rather than triggering the supervisor restart-
-  # storm + 3 stack traces before max_restarts surfaces the failure.
-  defp boot_canary_task do
-    if Application.get_env(:engram, :boot_canary_enabled, true) do
-      %{
-        id: :engram_boot_canary,
-        start: {Task, :start_link, [&Engram.Crypto.BootCanary.verify!/0]},
-        restart: :temporary,
-        type: :worker
-      }
-    end
   end
 
   defp clerk_strategy_child do

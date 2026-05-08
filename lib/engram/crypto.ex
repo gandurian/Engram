@@ -122,8 +122,15 @@ defmodule Engram.Crypto do
     end
   end
 
-  defp needs_note_decrypt?(%Engram.Notes.Note{} = note),
-    do: not is_nil(note.content_ciphertext) or not is_nil(note.path_ciphertext)
+  defp needs_note_decrypt?(%Engram.Notes.Note{} = note) do
+    # T3.0.4 — gate on the three independent ciphertext "groups." Sub-helpers
+    # short-circuit on each field's own nil, so we only need to check one
+    # representative per group: content (with title), path (with folder),
+    # and tags (standalone). Any group present → load DEK + run decrypt.
+    not is_nil(note.content_ciphertext) or
+      not is_nil(note.path_ciphertext) or
+      not is_nil(note.tags_ciphertext)
+  end
 
   defp decrypt_phase_4_note_fields(%Engram.Notes.Note{content_ciphertext: nil} = note, _dek),
     do: {:ok, note}

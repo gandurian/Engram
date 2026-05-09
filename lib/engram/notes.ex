@@ -55,7 +55,9 @@ defmodule Engram.Notes do
 
               with {:ok, encrypted} <-
                      Engram.Crypto.encrypt_note_fields(base_attrs, user, note_id) do
-                phase_b = inject_phase_b_fields(encrypted, user, note_id, sanitized_path, folder, tags)
+                phase_b =
+                  inject_phase_b_fields(encrypted, user, note_id, sanitized_path, folder, tags)
+
                 changeset = Note.changeset(%Note{id: note_id}, phase_b)
 
                 case Repo.insert(changeset) do
@@ -70,7 +72,15 @@ defmodule Engram.Notes do
               else
                 with {:ok, encrypted} <-
                        Engram.Crypto.encrypt_note_fields(base_attrs, user, existing.id) do
-                  phase_b = inject_phase_b_fields(encrypted, user, existing.id, sanitized_path, folder, tags)
+                  phase_b =
+                    inject_phase_b_fields(
+                      encrypted,
+                      user,
+                      existing.id,
+                      sanitized_path,
+                      folder,
+                      tags
+                    )
 
                   existing
                   |> Note.changeset(Map.put(phase_b, :version, existing.version + 1))
@@ -238,6 +248,7 @@ defmodule Engram.Notes do
           EmbedNote.new_debounced(note.id, old_path_hmac: old_path_hmac_b64!(user, old_path)),
           "embed_note"
         )
+
         broadcast_change(user.id, vault.id, "delete", old_path)
         decrypted = decrypt_or_raise!(note, user)
         broadcast_change(user.id, vault.id, "upsert", note.path, decrypted)

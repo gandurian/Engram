@@ -44,7 +44,11 @@ defmodule EngramWeb.Plugs.RotationLockCheckTest do
     end
 
     @tag :integration
-    test "GET /api/me returns 503 when user is rotation-locked", %{conn: conn, user: _user, api_key: api_key} do
+    test "GET /api/me returns 503 when user is rotation-locked", %{
+      conn: conn,
+      user: _user,
+      api_key: api_key
+    } do
       conn =
         conn
         |> put_req_header("authorization", "Bearer #{api_key}")
@@ -55,7 +59,11 @@ defmodule EngramWeb.Plugs.RotationLockCheckTest do
     end
 
     @tag :integration
-    test "GET /api/folders/list returns 503 when user is rotation-locked", %{conn: conn, user: _user, api_key: api_key} do
+    test "GET /api/folders/list returns 503 when user is rotation-locked", %{
+      conn: conn,
+      user: _user,
+      api_key: api_key
+    } do
       conn =
         conn
         |> put_req_header("authorization", "Bearer #{api_key}")

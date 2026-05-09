@@ -87,9 +87,7 @@ defmodule EngramWeb.SyncChannel do
           %{gate_path: :channel, op: :push_note}
         )
 
-        {:reply,
-         {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}},
-         socket}
+        {:reply, {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}}, socket}
 
       {:error, :user_not_found} ->
         {:reply, {:error, %{reason: "user_not_found"}}, socket}
@@ -128,9 +126,7 @@ defmodule EngramWeb.SyncChannel do
           %{gate_path: :channel, op: :delete_note}
         )
 
-        {:reply,
-         {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}},
-         socket}
+        {:reply, {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}}, socket}
 
       {:error, :user_not_found} ->
         {:reply, {:error, %{reason: "user_not_found"}}, socket}
@@ -159,9 +155,7 @@ defmodule EngramWeb.SyncChannel do
           %{gate_path: :channel, op: :rename_note}
         )
 
-        {:reply,
-         {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}},
-         socket}
+        {:reply, {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}}, socket}
 
       {:error, :user_not_found} ->
         {:reply, {:error, %{reason: "user_not_found"}}, socket}
@@ -198,9 +192,7 @@ defmodule EngramWeb.SyncChannel do
           %{gate_path: :channel, op: :pull_changes}
         )
 
-        {:reply,
-         {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}},
-         socket}
+        {:reply, {:error, %{reason: "rotation_in_progress", retry_after_seconds: 60}}, socket}
 
       {:error, :user_not_found} ->
         {:reply, {:error, %{reason: "user_not_found"}}, socket}

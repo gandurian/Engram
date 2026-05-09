@@ -65,5 +65,6 @@ defmodule EngramWeb.BillingController do
   end
 
   # Logger metadata helper only — both call sites pipe into Logger.error/2.
-  defp stripe_error_meta(other), do: [reason: inspect(other)] # noqa: T3.0.6 — Logger metadata only
+  # noqa: T3.0.6 — Logger metadata only
+  defp stripe_error_meta(other), do: [reason: inspect(other)]
 end

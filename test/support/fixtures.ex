@@ -234,7 +234,10 @@ defmodule Engram.Fixtures do
       end
 
     attrs = Enum.into(attrs, %{}, fn {k, v} -> {to_string(k), v} end)
-    path = Map.get(attrs, "path", "test/att-#{System.unique_integer([:positive, :monotonic])}.bin")
+
+    path =
+      Map.get(attrs, "path", "test/att-#{System.unique_integer([:positive, :monotonic])}.bin")
+
     content = Map.get(attrs, "content", <<0, 1, 2, 3>>)
     mime_type = Map.get(attrs, "mime_type", "application/octet-stream")
     mtime = Map.get(attrs, "mtime", 0.0)

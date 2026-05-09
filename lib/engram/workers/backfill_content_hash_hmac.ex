@@ -177,9 +177,7 @@ defmodule Engram.Workers.BackfillContentHashHmac do
       {:error, reason} ->
         emit_skip_telemetry(:note, note, reason)
 
-        Logger.error(
-          "BackfillContentHashHmac: skipping note #{note.id} (#{inspect(reason)})"
-        )
+        Logger.error("BackfillContentHashHmac: skipping note #{note.id} (#{inspect(reason)})")
     end
   end
 
@@ -200,9 +198,7 @@ defmodule Engram.Workers.BackfillContentHashHmac do
       err ->
         emit_skip_telemetry(:attachment, att, err)
 
-        Logger.error(
-          "BackfillContentHashHmac: skipping attachment #{att.id} (#{inspect(err)})"
-        )
+        Logger.error("BackfillContentHashHmac: skipping attachment #{att.id} (#{inspect(err)})")
     end
   end
 

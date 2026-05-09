@@ -52,8 +52,7 @@ defmodule Engram.Crypto.KeyProvider.Local do
     master = Config.local_master_key!()
     {ct, nonce} = Envelope.encrypt(dek, master, aad)
 
-    {:ok,
-     <<@wrap_version_v2, @alg_aes_256_gcm, nonce::binary-size(12), ct::binary>>}
+    {:ok, <<@wrap_version_v2, @alg_aes_256_gcm, nonce::binary-size(12), ct::binary>>}
   end
 
   @impl true
@@ -169,8 +168,7 @@ defmodule Engram.Crypto.KeyProvider.Local do
       %{
         user_id: Map.get(ctx, :user_id),
         dek_version: Map.get(ctx, :dek_version),
-        master_key_version:
-          Map.get(ctx, :master_key_version) || Config.master_key_version(),
+        master_key_version: Map.get(ctx, :master_key_version) || Config.master_key_version(),
         # T3-audit M1 — `:status` matches rotate.user / aad_rebind.user
         # metadata. Single, consistent dispatch tag across crypto events.
         status: classified

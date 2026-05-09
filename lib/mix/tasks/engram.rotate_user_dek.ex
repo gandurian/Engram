@@ -64,7 +64,11 @@ defmodule Mix.Tasks.Engram.RotateUserDek do
         :ok
 
       {:error, :rotation_in_progress} ->
-        IO.puts(:stderr, "ERROR: lock held by another rotation; retry or wait 10 min for stale-takeover")
+        IO.puts(
+          :stderr,
+          "ERROR: lock held by another rotation; retry or wait 10 min for stale-takeover"
+        )
+
         exit({:shutdown, 2})
 
       {:error, :not_found} ->
@@ -89,7 +93,11 @@ defmodule Mix.Tasks.Engram.RotateUserDek do
         exit({:shutdown, 5})
 
       {:error, reason} ->
-        IO.puts(:stderr, "ERROR: rotation FAILED — investigate before retry reason=#{inspect(reason)}")
+        IO.puts(
+          :stderr,
+          "ERROR: rotation FAILED — investigate before retry reason=#{inspect(reason)}"
+        )
+
         exit({:shutdown, 1})
     end
   end

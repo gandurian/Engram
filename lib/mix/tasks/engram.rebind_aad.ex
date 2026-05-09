@@ -52,9 +52,7 @@ defmodule Mix.Tasks.Engram.RebindAad do
 
     counts = AadRebind.rebind_all(batch_size: batch_size)
 
-    IO.puts(
-      "rebind complete: ok=#{counts.ok} skipped=#{counts.skipped} failed=#{counts.failed}"
-    )
+    IO.puts("rebind complete: ok=#{counts.ok} skipped=#{counts.skipped} failed=#{counts.failed}")
 
     if counts.failed > 0 do
       IO.puts(:stderr, "ERROR: #{counts.failed} users failed rebind — inspect telemetry")

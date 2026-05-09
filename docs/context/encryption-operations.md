@@ -300,3 +300,108 @@ If the drill fails, surface it as a P0 immediately; the off-site copy is suspect
 | Backup trustee | _[unassigned — to be appointed before saas paying-customers]_ | Emergency decryption authority |
 
 Next drill: **2026-08-08**. Track in `~/Calendar` or equivalent.
+
+## T3.7.4 — DEK leak incident response runbook
+
+A per-user DEK leak is a Critical-severity event. Until T3.7 shipped (2026-05-08), the only honest answer was "the user's data is permanently compromised — every ciphertext row was readable to whoever held the leaked key." T3.7 replaces that with a working rotation procedure: a single command that re-encrypts every note, vault, attachment, and Qdrant payload owned by one user under a fresh DEK, while the user is read+write locked (HTTP 503 + `Retry-After: 60`).
+
+The orchestrator chooses the new dek_version internally (`current + 1`). Operators do not specify a target version. Re-running rotates again to a fresh version — do not re-enqueue without need.
+
+### Detection signals
+
+- An operator observes a DEK plaintext value outside the backend (logs, crash dump, exfiltrated heap snapshot).
+- Telemetry `[:engram, :crypto, :previous_fallback_hit]` with `status: :failed` for a single `user_id` (suggests the user's wrapped DEK was tampered — investigate before rotating).
+- A successful unauthorized decrypt on Qdrant payloads from an external IP (storage-layer leak indicator).
+
+### Pre-rotation checks
+
+1. Confirm no other rotation is in flight for this user:
+
+       psql $DATABASE_URL -c "SELECT id, dek_rotation_locked_at FROM users WHERE id = :user_id;"
+
+   If `dek_rotation_locked_at` is non-null and < 10 min ago, a rotation is already running. Wait for it to finish before re-issuing. Stale locks (> 10 min) are auto-takeover'd by `RotationLock.acquire/2`.
+
+2. Capture the rollback reference:
+
+       psql $DATABASE_URL -c "SELECT id, dek_version, encrypted_dek FROM users WHERE id = :user_id;"
+
+   Store `dek_version` for verification post-rotation.
+
+3. Notify the user (if appropriate) that their account will be unavailable for ~60s. Reads + writes return 503 during the window.
+
+### Rotation command
+
+Local / staging (Mix task — operator gets exit code, blocks until done):
+
+    mix engram.rotate_user_dek --user-id <ID>
+
+Production (release rpc — synchronous, fits short rotations < 1 min):
+
+    docker exec engram-saas /app/bin/engram rpc \
+      "Engram.Crypto.UserDekRotation.rotate_user(<ID>)"
+
+Production (Oban worker — preferred for long rotations that must survive node restarts):
+
+    Engram.Workers.RotateUserDek.new(%{"user_id" => <ID>}) |> Oban.insert()
+
+Worker uniqueness on `[:user_id]` collapses duplicate enqueues to the same job — safe to enqueue from multiple operator scripts without coordinating.
+
+### Expected duration
+
+- 1k notes: ~10s
+- 10k notes: ~60s
+- 100k notes: not yet benchmarked. If > 1 min outage is unacceptable, prefer the Oban worker route and operate during a planned maintenance window.
+
+### Telemetry to watch
+
+- `engram.crypto.rotate.dek.count{status="ok"}` ≥ 1 — rotation completed.
+- `engram.crypto.rotate.dek.count{status="failed"}` — investigate immediately. Reason label in event metadata.
+- `engram.crypto.rotate.dek.duration_us` — verify within the expected band for note count.
+
+### Verify completion
+
+    psql $DATABASE_URL -c "SELECT id, dek_version, dek_rotation_locked_at FROM users WHERE id = :user_id;"
+
+Both must hold:
+
+- `dek_version` advanced by exactly 1 from the pre-rotation snapshot.
+- `dek_rotation_locked_at` is NULL.
+
+If `dek_version` did not advance OR `dek_rotation_locked_at` is still set, rotation failed mid-flight. Inspect Logger.error output (category `:crypto_rotation`) for the failing phase, fix the underlying cause, then re-run the same command. Resume is best-effort: the sweep loops use decrypt-as-discriminator (try old DEK, fall through to new DEK), so any rows already rotated by the failed run are tolerated on the retry; remaining rows finish under the new DEK.
+
+### Rollback
+
+DEK rotation has NO clean rollback once `users.encrypted_dek` is flipped (final phase of the orchestrator). Pre-flip rollback: re-acquire the lock, manually clear `attachments.dek_version_pending` and revert any partially-rotated rows from a backup. Post-flip rollback: not supported. Restore from a database snapshot taken before the rotation if absolutely required.
+
+The lock-during-rotation contract — `RotationLockCheck` plug for REST routes plus `RotationGate` checks in Phoenix channels (`SyncChannel`) and Oban writers (`EmbedNote`, `BackfillContentHashHmac`) — blocks all per-user write paths during the rotation window. Reads are also gated to avoid the brief sweep-progress window where rotated rows would decrypt-fail under the still-cached old DEK. The post-flip risks are operator error in the rotation command itself (catastrophic but defended by pre-flight checks above) and any new writer that accesses the user's DEK without going through the gate.
+
+### Half-state recovery (after a mid-attachment crash)
+
+If the rotation crashed mid-attachment (BEAM died between the S3 PUT and the second DB transaction in `sweep_attachments`), the user is left with:
+
+- `users.dek_rotation_locked_at` non-null (intentional — operator must investigate).
+- One or more `attachments.dek_version_pending` non-null (the half-rotated rows).
+- S3 blobs for those attachments encrypted under a DEK that is permanently lost (the in-flight DEK_new from the dead BEAM's heap).
+
+Stale-lock takeover (after 10 min) is REFUSED in this state — `acquire/1` returns `{:error, :half_state_pending}`, the worker discards `:half_state_pending`, the Mix task exits with code 5. This is intentional: a fresh rotation would generate a different DEK and corrupt the half-rotated S3 blobs irreversibly.
+
+Recovery steps:
+
+1. Identify the half-rotated attachments:
+
+       SELECT id, vault_id, storage_key, dek_version, dek_version_pending FROM attachments
+        WHERE user_id = :user_id AND dek_version_pending IS NOT NULL;
+
+2. For each `storage_key`, restore the previous version from S3 versioning (the version BEFORE the failed PUT). The Tigris/S3 admin UI exposes the version history.
+
+3. Once all S3 blobs are restored, clear the pending column and the user lock in one transaction:
+
+       BEGIN;
+       UPDATE attachments SET dek_version_pending = NULL
+         WHERE user_id = :user_id AND dek_version_pending IS NOT NULL;
+       UPDATE users SET dek_rotation_locked_at = NULL WHERE id = :user_id;
+       COMMIT;
+
+4. Re-run the rotation. Since the S3 blobs are now back at the pre-rotation state and `dek_version` was never bumped on those rows, the sweep proceeds normally under a fresh DEK.
+
+If S3 versioning is not available or the restore fails, the data is lost — the only recourse is to delete the affected attachment rows and notify the user. There is no way to recover the in-flight DEK from a dead BEAM heap.

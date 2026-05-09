@@ -66,5 +66,40 @@ defmodule EngramWeb.TelemetryTest do
       assert "engram.indexing.encrypt_failed.count" in names,
              "Indexing encrypt failures (e.g. missing DEK) must be counted"
     end
+
+    # T3.7 — per-user DEK rotation telemetry
+    test "registers engram.crypto.rotate.dek counter (T3.7 per-user DEK rotation)", %{
+      names: names
+    } do
+      assert "engram.crypto.rotate.dek.count" in names,
+             "UserDekRotation per-DEK outcome must be counted (status, reason_label)"
+    end
+
+    test "registers engram.crypto.rotate.dek duration summary (T3.7 per-user DEK rotation)", %{
+      names: names
+    } do
+      assert "engram.crypto.rotate.dek.duration_us" in names,
+             "UserDekRotation per-DEK duration must be measured"
+    end
+
+    test "registers engram.crypto.rotate.dek.row_failed counter (T3.7 per-row failures)", %{
+      names: names
+    } do
+      assert "engram.crypto.rotate.dek.row_failed.count" in names,
+             "Per-row T3.7 rotation failures (decrypt-both-failed, missing-id) must be counted"
+    end
+
+    test "registers engram.crypto.rotate.dek.snoozed counter (T3.7 lock contention)", %{
+      names: names
+    } do
+      assert "engram.crypto.rotate.dek.snoozed.count" in names,
+             "T3.7 snooze events (lock held by another rotation) must be counted"
+    end
+
+    test "registers engram.crypto.rotate.dek.gate_blocked counter (T3.7 channel/worker bypass)",
+         %{names: names} do
+      assert "engram.crypto.rotate.dek.gate_blocked.count" in names,
+             "T3.7 writes/reads blocked at channel/worker bypass path must be counted"
+    end
   end
 end

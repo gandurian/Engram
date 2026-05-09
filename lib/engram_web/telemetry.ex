@@ -105,6 +105,29 @@ defmodule EngramWeb.Telemetry do
         tags: [:status],
         description: "AadRebind per-user duration"
       ),
+      counter("engram.crypto.rotate.dek.count",
+        tags: [:status, :reason_label],
+        description: "UserDekRotation per-DEK outcome (T3.7 per-user DEK rotation)"
+      ),
+      summary("engram.crypto.rotate.dek.duration_us",
+        unit: {:native, :microsecond},
+        tags: [:status],
+        description: "UserDekRotation per-DEK duration"
+      ),
+      counter("engram.crypto.rotate.dek.row_failed.count",
+        event_name: [:engram, :crypto, :rotate, :dek, :row_failed],
+        measurement: :count,
+        tags: [:table, :phase, :status],
+        description:
+          "T3.7 per-row failure during user DEK rotation (decrypt-both-failed, missing-id, etc.)"
+      ),
+      counter("engram.crypto.rotate.dek.snoozed.count",
+        event_name: [:engram, :crypto, :rotate, :dek, :snoozed],
+        measurement: :count,
+        tags: [:user_id],
+        description:
+          "T3.7 per-user DEK rotation snoozed because lock held by another rotation"
+      ),
       counter("engram.crypto.aad_rebind.attachment_skipped.count",
         description:
           "Attachments NOT rebound by AadRebind (intentional — converge on next upload). Non-zero count means the user has unconverged S3 blobs that still read as legacy AAD."
@@ -127,6 +150,18 @@ defmodule EngramWeb.Telemetry do
       ),
       counter("engram.indexing.encrypt_failed.count",
         description: "Indexing-time encrypt failures (e.g. missing DEK at re-embed)"
+      ),
+
+      # T3.7 — rotation gate blocked events (channel + worker bypass paths).
+      # Emitted whenever a SyncChannel handler or Oban worker is turned away
+      # because the user's DEK rotation is in flight. Operators can use the
+      # rate to size the retry window and quantify contention per rotation run.
+      counter("engram.crypto.rotate.dek.gate_blocked.count",
+        event_name: [:engram, :crypto, :rotate, :dek, :gate_blocked],
+        measurement: :count,
+        tags: [:gate_path, :op],
+        description:
+          "T3.7 writes/reads blocked by RotationGate (channel/worker bypass path). Tags: gate_path (:channel | :worker), op (handler/worker name)"
       )
     ]
   end

@@ -601,11 +601,9 @@ jobs:
 
       - name: Format check
         run: mix format --check-formatted
-        continue-on-error: true
 
       - name: Compile warnings-as-errors
         run: mix compile --warnings-as-errors --force
-        continue-on-error: true
 
       - name: Credo (strict)
         run: mix credo --strict --mute-exit-status

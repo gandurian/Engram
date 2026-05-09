@@ -8,8 +8,8 @@ Plan: `../../../engram-workspace/docs/superpowers/plans/2026-05-09-quality-tooli
 
 | Tool | Findings | Status | Ratchet target |
 |------|----------|--------|----------------|
-| `mix format` | 0 | informational (Phase 2 → fatal) | 0 (already clean) |
-| `mix compile --warnings-as-errors` | 0 | informational (Phase 2 → fatal) | 0 (already clean) |
+| `mix format` | 0 | **gated** (Phase 2) | 0 (held) |
+| `mix compile --warnings-as-errors` | 0 | **gated** (Phase 2) | 0 (held) |
 | Sobelow (threshold low, exit low, --skip) | 0 | informational (Phase 3 → fatal) | 0 (already clean) |
 | Dialyzer (with `:unmatched_returns`, `:error_handling`, `:underspecs`, `:missing_return`, `:extra_return`) | 81 | informational (Phase 4 → fatal) | 0 |
 | Credo (`--strict`) | 676 | informational (Phase 5 → fatal) | 0 |

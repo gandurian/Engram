@@ -19,9 +19,16 @@ defmodule EngramWeb.Router do
     plug EngramWeb.Plugs.RateLimit, limit: 10, period: 60_000
   end
 
-  pipeline :browser do
+  # SPA shell pipeline — HTML responses with strict browser-security headers.
+  # x-frame-options=DENY is critical for /oauth/consent: without it the consent
+  # UI could be iframed by an attacker site and the approval click hijacked.
+  pipeline :spa do
     plug :accepts, ["html"]
-    plug :put_secure_browser_headers
+
+    plug :put_secure_browser_headers, %{
+      "x-content-type-options" => "nosniff",
+      "x-frame-options" => "DENY"
+    }
   end
 
   # Stripe webhooks — no auth, raw body for signature verification
@@ -54,8 +61,8 @@ defmodule EngramWeb.Router do
   # OAuth 2.1 user-facing authorize endpoint (RFC 6749 §4.1.1).
   # PUBLIC: browsers hit this via 302 from the OAuth client and do not
   # carry Bearer headers on navigation. The controller validates client
-  # credentials + PKCE then 302s to the SPA at /app/oauth/authorize,
-  # which mediates consent under the user's existing JWT session.
+  # credentials + PKCE then 302s to the SPA at /oauth/consent, which
+  # mediates consent under the user's existing JWT session.
   scope "/oauth", EngramWeb do
     pipe_through :oauth_api
 
@@ -191,21 +198,23 @@ defmodule EngramWeb.Router do
     end
   end
 
-  # Marketing pages — server-rendered HTML, before SPA catch-all
+  # SPA routes — every path here mounts the React app. Whitelisted (not a
+  # blanket /*path catch-all) so unknown URLs hit Phoenix's default 404
+  # instead of silently rendering an HTML 200 over a typo'd API/OAuth/asset
+  # request. Every new top-level SPA route must be added here.
   scope "/", EngramWeb do
-    pipe_through :browser
+    pipe_through :spa
 
-    get "/", MarketingController, :index
-    get "/pricing", MarketingController, :pricing
-    get "/docs", MarketingController, :docs
-  end
-
-  # SPA fallback — serves React app for all /app and /share routes.
-  # Plug.Static in endpoint.ex serves actual asset files first;
-  # only non-file requests reach these catch-all routes.
-  scope "/", EngramWeb do
-    get "/app", SpaController, :index
-    get "/app/*path", SpaController, :index
+    get "/", SpaController, :index
+    get "/sign-in", SpaController, :index
+    get "/sign-up", SpaController, :index
+    get "/link", SpaController, :index
+    get "/search", SpaController, :index
+    get "/billing", SpaController, :index
+    get "/settings", SpaController, :index
+    get "/settings/*path", SpaController, :index
+    get "/note/*path", SpaController, :index
+    get "/oauth/consent", SpaController, :index
     get "/share/*path", SpaController, :index
   end
 end

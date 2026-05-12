@@ -31,9 +31,13 @@ export default function NotePage() {
   const tocRef = useRef<ImperativePanelHandle>(null)
   const [tocCollapsed, setTocCollapsed] = useState(false)
 
+  // Sync draft only when the user navigates to a different note. Re-syncing
+  // on every `note.content` change would clobber in-progress edits whenever
+  // React Query refetched (window focus, channel-driven invalidation, etc.).
   useEffect(() => {
     if (note) setDraft(note.content)
-  }, [note?.path, note?.content])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [note?.path])
 
   const toggleToc = () => {
     const panel = tocRef.current

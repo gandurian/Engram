@@ -26,13 +26,13 @@ export default function AttachmentImg({ path, alt }: { path: string; alt?: strin
 
   if (error) {
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
+      <span className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive">
         Missing attachment: {path}
       </span>
     )
   }
   if (!src) {
-    return <span className="text-xs text-gray-400">Loading {path}…</span>
+    return <span className="text-xs text-muted-foreground">Loading {path}…</span>
   }
   return <img src={src} alt={alt ?? path} className="my-2 max-w-full rounded" />
 }

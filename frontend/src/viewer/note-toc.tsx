@@ -29,17 +29,17 @@ export default function NoteToc({ content }: { content: string }) {
 
   return (
     <nav aria-label="Table of contents" className="text-xs">
-      <p className="mb-2 font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">On this page</p>
-      <ul className="space-y-1 border-l border-gray-200 dark:border-gray-800">
+      <p className="mb-2 font-semibold uppercase tracking-wide text-muted-foreground">On this page</p>
+      <ul className="space-y-1 border-l border-border">
         {headings.map((h, i) => (
           <li
             key={`${h.id}-${i}`}
             style={{ paddingLeft: `${(h.depth - 1) * 0.75}rem` }}
-            className="-ml-px border-l border-transparent pl-3 transition hover:border-indigo-400"
+            className="-ml-px border-l border-transparent pl-3 transition hover:border-primary"
           >
             <a
               href={`#${h.id}`}
-              className="block py-0.5 text-gray-600 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400"
+              className="block py-0.5 text-muted-foreground hover:text-foreground"
             >
               {h.text}
             </a>

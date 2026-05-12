@@ -72,7 +72,7 @@
 
   /* Anchor link icon next to headings (rehype-autolink-headings, behavior: "append"). */
   .prose .anchor {
-    @apply ml-2 text-gray-300 no-underline opacity-0 transition hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400;
+    @apply ml-2 text-muted-foreground/40 no-underline opacity-0 transition hover:text-muted-foreground;
   }
   .prose h1:hover .anchor,
   .prose h2:hover .anchor,

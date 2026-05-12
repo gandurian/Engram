@@ -1,15 +1,9 @@
-import { PanelRightClose, PanelRightOpen } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
-import type { ImperativePanelHandle } from 'react-resizable-panels'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router'
 import { toast } from 'sonner'
 import { useNote, useUpdateNote } from '../api/queries'
+import { useRightSidebar } from '../layout/right-sidebar-context'
 import { Button } from '@/components/ui/button'
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from '@/components/ui/resizable'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import NoteEditor from './note-editor'
@@ -25,11 +19,10 @@ export default function NotePage() {
 
   const { data: note, isLoading, error } = useNote(path)
   const update = useUpdateNote()
+  const { setContent: setRightContent } = useRightSidebar()
 
   const [mode, setMode] = useState<Mode>('preview')
   const [draft, setDraft] = useState('')
-  const tocRef = useRef<ImperativePanelHandle>(null)
-  const [tocCollapsed, setTocCollapsed] = useState(false)
 
   // Sync draft only when the user navigates to a different note. Re-syncing
   // on every `note.content` change would clobber in-progress edits whenever
@@ -39,12 +32,16 @@ export default function NotePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note?.path])
 
-  const toggleToc = () => {
-    const panel = tocRef.current
-    if (!panel) return
-    if (panel.isCollapsed()) panel.expand()
-    else panel.collapse()
-  }
+  // Push the ToC into the app-shell right sidebar while we're in preview;
+  // clear it when leaving the page or switching to edit mode.
+  useEffect(() => {
+    if (!note || mode !== 'preview') {
+      setRightContent(null)
+      return
+    }
+    setRightContent(<NoteToc content={note.content} />)
+    return () => setRightContent(null)
+  }, [note?.path, note?.content, mode, setRightContent])
 
   if (!path) {
     return <p className="p-6 text-muted-foreground">No note selected</p>
@@ -74,7 +71,7 @@ export default function NotePage() {
     }
   }
 
-  const card = (
+  return (
     <Tabs
       value={mode}
       onValueChange={(v) => setMode(v as Mode)}
@@ -85,34 +82,21 @@ export default function NotePage() {
           <TabsTrigger value="preview">Preview</TabsTrigger>
           <TabsTrigger value="edit">Edit</TabsTrigger>
         </TabsList>
-        <div className="flex items-center gap-2">
-          {mode === 'edit' && (
-            <>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setDraft(note.content)}
-                disabled={!dirty || saving}
-              >
-                Revert
-              </Button>
-              <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
-                {saving ? 'Saving…' : 'Save'}
-              </Button>
-            </>
-          )}
-          {mode === 'preview' && (
+        {mode === 'edit' && (
+          <div className="flex items-center gap-2">
             <Button
               variant="ghost"
-              size="icon-sm"
-              onClick={toggleToc}
-              aria-label={tocCollapsed ? 'Show outline' : 'Hide outline'}
-              title={tocCollapsed ? 'Show outline' : 'Hide outline'}
+              size="sm"
+              onClick={() => setDraft(note.content)}
+              disabled={!dirty || saving}
             >
-              {tocCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
+              Revert
             </Button>
-          )}
-        </div>
+            <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        )}
       </div>
 
       <TabsContent
@@ -141,38 +125,5 @@ export default function NotePage() {
         </ScrollArea>
       </TabsContent>
     </Tabs>
-  )
-
-  return (
-    <div className="mx-auto h-full w-full max-w-[100rem]">
-      <ResizablePanelGroup direction="horizontal" autoSaveId="engram:note-page">
-        <ResizablePanel id="note-card" order={1} defaultSize={78} minSize={45}>
-          {card}
-        </ResizablePanel>
-        {mode === 'preview' && (
-          <>
-            <ResizableHandle withHandle />
-            <ResizablePanel
-              id="note-toc"
-              order={2}
-              ref={tocRef}
-              defaultSize={22}
-              minSize={12}
-              maxSize={40}
-              collapsible
-              collapsedSize={0}
-              onCollapse={() => setTocCollapsed(true)}
-              onExpand={() => setTocCollapsed(false)}
-            >
-              <ScrollArea className="h-full">
-                <div className="p-1">
-                  <NoteToc content={note.content} />
-                </div>
-              </ScrollArea>
-            </ResizablePanel>
-          </>
-        )}
-      </ResizablePanelGroup>
-    </div>
   )
 }

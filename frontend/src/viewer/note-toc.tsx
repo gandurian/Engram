@@ -28,20 +28,21 @@ export default function NoteToc({ content }: { content: string }) {
   if (headings.length < 2) return null
 
   return (
-    <nav aria-label="Table of contents" className="text-xs">
-      <p className="mb-2 font-semibold uppercase tracking-wide text-muted-foreground">On this page</p>
-      <ul className="space-y-1 border-l border-border">
+    <nav aria-label="Table of contents" className="text-sm">
+      <header className="border-b border-border px-3 py-2">
+        <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          On this page
+        </p>
+      </header>
+      <ul role="list" className="space-y-px py-2">
         {headings.map((h, i) => (
-          <li
-            key={`${h.id}-${i}`}
-            style={{ paddingLeft: `${(h.depth - 1) * 0.75}rem` }}
-            className="-ml-px border-l border-transparent pl-3 transition hover:border-primary"
-          >
+          <li key={`${h.id}-${i}`}>
             <a
               href={`#${h.id}`}
-              className="block py-0.5 text-muted-foreground hover:text-foreground"
+              style={{ paddingLeft: `${0.75 + (h.depth - 1) * 0.75}rem` }}
+              className="flex items-center gap-1 rounded px-1 py-0.5 text-foreground/80 hover:bg-muted hover:text-foreground"
             >
-              {h.text}
+              <span className="truncate">{h.text}</span>
             </a>
           </li>
         ))}

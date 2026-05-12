@@ -1,5 +1,10 @@
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react'
-import { lazy, Suspense, useRef, useState } from 'react'
+import {
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+} from 'lucide-react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { ImperativePanelHandle } from 'react-resizable-panels'
 import { Link, NavLink, Outlet } from 'react-router'
 import { Button } from '@/components/ui/button'
@@ -20,6 +25,7 @@ import { useBillingStatus } from '../api/queries'
 import { useChannel } from '../api/use-channel'
 import ThemeToggle from '../theme/theme-toggle'
 import FolderTree from '../viewer/folder-tree'
+import { RightSidebarProvider, useRightSidebar } from './right-sidebar-context'
 import VaultSwitcher from './vault-switcher'
 
 function HeaderLink({ to, label }: { to: string; label: string }) {
@@ -37,18 +43,41 @@ function HeaderLink({ to, label }: { to: string; label: string }) {
   )
 }
 
-export default function AppLayout() {
-  const sidebarRef = useRef<ImperativePanelHandle>(null)
-  const [collapsed, setCollapsed] = useState(false)
+function AppLayoutInner() {
+  const leftRef = useRef<ImperativePanelHandle>(null)
+  const rightRef = useRef<ImperativePanelHandle>(null)
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const { content: rightContent, collapsed: rightCollapsed, setCollapsed: setRightCollapsed } =
+    useRightSidebar()
+
   useChannel()
   const { data: billing } = useBillingStatus()
 
-  const toggleSidebar = () => {
-    const panel = sidebarRef.current
-    if (!panel) return
-    if (panel.isCollapsed()) panel.expand()
-    else panel.collapse()
+  const toggleLeft = () => {
+    const p = leftRef.current
+    if (!p) return
+    if (p.isCollapsed()) p.expand()
+    else p.collapse()
   }
+
+  const toggleRight = () => {
+    const p = rightRef.current
+    if (!p) return
+    if (p.isCollapsed()) p.expand()
+    else p.collapse()
+  }
+
+  // When a page stops contributing right-sidebar content, force the panel
+  // closed so it doesn't sit empty taking up space on the next route.
+  useEffect(() => {
+    if (rightContent == null) {
+      rightRef.current?.collapse()
+    } else if (rightRef.current?.isCollapsed()) {
+      rightRef.current?.expand()
+    }
+  }, [rightContent])
+
+  const hasRight = rightContent != null
 
   return (
     <>
@@ -59,22 +88,10 @@ export default function AppLayout() {
       )}
       <section className="flex h-screen flex-col bg-background text-foreground">
         <header className="flex items-center justify-between border-b border-border bg-card px-4 py-2">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={toggleSidebar}
-              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              aria-expanded={!collapsed}
-              aria-controls="sidebar"
-            >
-              {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-            </Button>
-            <Link to="/" className="text-lg font-semibold text-foreground hover:text-foreground/80">
-              Engram
-            </Link>
-          </div>
-          <nav className="flex items-center gap-4" aria-label="Main navigation">
+          <Link to="/" className="text-lg font-semibold text-foreground hover:text-foreground/80">
+            Engram
+          </Link>
+          <nav className="flex items-center gap-3" aria-label="Main navigation">
             <HeaderLink to="/search" label="Search" />
             <HeaderLink to="/billing" label="Billing" />
             <HeaderLink to="/settings" label="Settings" />
@@ -93,29 +110,103 @@ export default function AppLayout() {
           <ResizablePanel
             id="sidebar"
             order={1}
-            ref={sidebarRef}
+            ref={leftRef}
             defaultSize={18}
             minSize={12}
             maxSize={40}
             collapsible
             collapsedSize={0}
-            onCollapse={() => setCollapsed(true)}
-            onExpand={() => setCollapsed(false)}
+            onCollapse={() => setLeftCollapsed(true)}
+            onExpand={() => setLeftCollapsed(false)}
             className="border-r border-border bg-card"
           >
-            <ScrollArea className="h-full">
-              <VaultSwitcher />
-              <FolderTree />
-            </ScrollArea>
+            <div className="flex h-full flex-col">
+              <div className="flex shrink-0 items-center justify-end border-b border-border px-1 py-1">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleLeft}
+                  aria-label="Collapse sidebar"
+                  title="Collapse sidebar"
+                >
+                  <PanelLeftClose />
+                </Button>
+              </div>
+              <ScrollArea className="flex-1">
+                <VaultSwitcher />
+                <FolderTree />
+              </ScrollArea>
+            </div>
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel id="main" order={2} defaultSize={82} minSize={40}>
-            <main className="h-full overflow-hidden bg-muted/40 p-6 text-foreground">
+          <ResizablePanel id="main" order={2} defaultSize={60} minSize={30}>
+            <main className="relative h-full overflow-hidden bg-muted/40 p-6 text-foreground">
+              {leftCollapsed && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleLeft}
+                  aria-label="Expand sidebar"
+                  title="Expand sidebar"
+                  className="absolute left-2 top-2 z-10 bg-card/80 backdrop-blur"
+                >
+                  <PanelLeftOpen />
+                </Button>
+              )}
+              {hasRight && rightCollapsed && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleRight}
+                  aria-label="Expand outline"
+                  title="Expand outline"
+                  className="absolute right-2 top-2 z-10 bg-card/80 backdrop-blur"
+                >
+                  <PanelRightOpen />
+                </Button>
+              )}
               <Outlet />
             </main>
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel
+            id="right-sidebar"
+            order={3}
+            ref={rightRef}
+            defaultSize={22}
+            minSize={12}
+            maxSize={40}
+            collapsible
+            collapsedSize={0}
+            onCollapse={() => setRightCollapsed(true)}
+            onExpand={() => setRightCollapsed(false)}
+            className="border-l border-border bg-card"
+          >
+            <div className="flex h-full flex-col">
+              <div className="flex shrink-0 items-center justify-start border-b border-border px-1 py-1">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleRight}
+                  aria-label="Collapse outline"
+                  title="Collapse outline"
+                >
+                  <PanelRightClose />
+                </Button>
+              </div>
+              <ScrollArea className="flex-1">{rightContent}</ScrollArea>
+            </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       </section>
     </>
+  )
+}
+
+export default function AppLayout() {
+  return (
+    <RightSidebarProvider>
+      <AppLayoutInner />
+    </RightSidebarProvider>
   )
 }

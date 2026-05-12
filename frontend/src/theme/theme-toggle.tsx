@@ -3,8 +3,7 @@ import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
+  DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import type { ThemeChoice } from './storage'
@@ -28,19 +27,28 @@ export default function ThemeToggle() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Theme: ${theme}`}
+          title={`Theme: ${theme}`}
+          data-theme-choice={theme}
+        >
           <ActiveIcon choice={theme} />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuRadioGroup value={theme} onValueChange={(v) => setTheme(v as ThemeChoice)}>
-          {OPTIONS.map(({ value, label, Icon }) => (
-            <DropdownMenuRadioItem key={value} value={value} data-theme-option={value}>
-              <Icon className="mr-2 size-4" />
-              {label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
+      <DropdownMenuContent align="end" aria-label="Theme">
+        {OPTIONS.map(({ value, label, Icon }) => (
+          <DropdownMenuItem
+            key={value}
+            onSelect={() => setTheme(value)}
+            data-theme-option={value}
+            aria-current={theme === value ? 'true' : undefined}
+          >
+            <Icon className="mr-2 size-4" />
+            {label}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   )

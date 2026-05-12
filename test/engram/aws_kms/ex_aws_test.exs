@@ -199,4 +199,94 @@ defmodule Engram.AwsKms.ExAwsTest do
     ctx = %{"user_id" => "5", "purpose" => "dek_wrap"}
     assert {:ok, <<0xBB, 0xCC>>} = KmsExAws.re_encrypt(<<0xAA>>, ctx, ctx)
   end
+
+  describe "telemetry" do
+    test "emits :request event with duration_us, op, status on successful encrypt", %{
+      bypass: bypass
+    } do
+      Bypass.expect_once(bypass, "POST", "/", fn conn ->
+        Plug.Conn.resp(conn, 200, ~s({"CiphertextBlob":"#{Base.encode64("ct")}"}))
+      end)
+
+      :telemetry.attach(
+        "kms-req-ok",
+        [:engram, :crypto, :kms, :request],
+        fn _name, meas, meta, _ -> send(self(), {:tel_req, meas, meta}) end,
+        nil
+      )
+
+      try do
+        assert {:ok, "ct"} =
+                 KmsExAws.encrypt("pt", %{"user_id" => "1", "purpose" => "dek_wrap"})
+
+        assert_received {:tel_req, %{duration_us: dur}, %{op: :encrypt, status: :ok}}
+        assert is_integer(dur) and dur >= 0
+      after
+        :telemetry.detach("kms-req-ok")
+      end
+    end
+
+    test "emits :failure event with error_class on AccessDenied", %{bypass: bypass} do
+      Bypass.expect(bypass, "POST", "/", fn conn ->
+        Plug.Conn.resp(
+          conn,
+          400,
+          ~s({"__type":"AccessDeniedException","message":"nope"})
+        )
+      end)
+
+      :telemetry.attach_many(
+        "kms-failure",
+        [
+          [:engram, :crypto, :kms, :request],
+          [:engram, :crypto, :kms, :failure]
+        ],
+        fn name, _meas, meta, _ -> send(self(), {name, meta}) end,
+        nil
+      )
+
+      try do
+        assert {:error, :access_denied} =
+                 KmsExAws.encrypt("pt", %{"user_id" => "1", "purpose" => "dek_wrap"})
+
+        assert_received {[:engram, :crypto, :kms, :request],
+                         %{op: :encrypt, status: :error, error_class: :access_denied}}
+
+        assert_received {[:engram, :crypto, :kms, :failure],
+                         %{op: :encrypt, error_class: :access_denied}}
+      after
+        :telemetry.detach("kms-failure")
+      end
+    end
+
+    test "emits :request and :failure with error_class :exception when the inner call raises" do
+      prev_key_id = Application.get_env(:engram, :aws_kms_key_id)
+      Application.delete_env(:engram, :aws_kms_key_id)
+
+      :telemetry.attach_many(
+        "kms-exception",
+        [
+          [:engram, :crypto, :kms, :request],
+          [:engram, :crypto, :kms, :failure]
+        ],
+        fn name, _meas, meta, _ -> send(self(), {name, meta}) end,
+        nil
+      )
+
+      try do
+        assert_raise ArgumentError, fn ->
+          KmsExAws.encrypt("pt", %{"user_id" => "1", "purpose" => "dek_wrap"})
+        end
+
+        assert_received {[:engram, :crypto, :kms, :request],
+                         %{op: :encrypt, status: :error, error_class: :exception}}
+
+        assert_received {[:engram, :crypto, :kms, :failure],
+                         %{op: :encrypt, error_class: :exception}}
+      after
+        :telemetry.detach("kms-exception")
+        if prev_key_id, do: Application.put_env(:engram, :aws_kms_key_id, prev_key_id)
+      end
+    end
+  end
 end

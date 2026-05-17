@@ -5,9 +5,9 @@
   # `<<_::N, _::_*8>>` shapes from the literal-string concatenation, but narrowing
   # the spec would leak implementation details to call sites and make any
   # caller-side `binary()` parameter type fail to match.
-  {"lib/engram/crypto.ex", :contract_supertype, 71},
-  {"lib/engram/crypto.ex", :contract_supertype, 82},
-  {"lib/engram/crypto.ex", :contract_supertype, 91},
+  {"lib/engram/crypto.ex", :contract_supertype, 72},
+  {"lib/engram/crypto.ex", :contract_supertype, 83},
+  {"lib/engram/crypto.ex", :contract_supertype, 92},
 
   # Dialyzer's success typing for `Path.rootname/1` (and possibly Regex helpers
   # called inside extract_title/2) reports a phantom `{integer(), integer()}`

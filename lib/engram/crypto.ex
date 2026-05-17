@@ -216,26 +216,31 @@ defmodule Engram.Crypto do
   defp maybe_enqueue_lazy_migration(user_id, source_provider) do
     configured = Resolver.provider()
 
-    if source_provider != configured do
-      target_atom =
-        case configured do
-          Engram.Crypto.KeyProvider.Local -> :local
-          Engram.Crypto.KeyProvider.AwsKms -> :aws_kms
-          _ -> nil
-        end
+    # Fire-and-forget enqueue: discard the Oban.insert result on purpose.
+    # Uniqueness `[:user_id, :target_provider]` collapses duplicate enqueues,
+    # so neither {:ok, _} nor {:error, _} nor a uniqueness `:ok` short-circuit
+    # changes the read path's behavior.
+    _ =
+      if source_provider != configured do
+        target_atom =
+          case configured do
+            Engram.Crypto.KeyProvider.Local -> :local
+            Engram.Crypto.KeyProvider.AwsKms -> :aws_kms
+            _ -> nil
+          end
 
-      if target_atom do
-        try do
-          %{"user_id" => user_id, "target_provider" => Atom.to_string(target_atom)}
-          |> Engram.Workers.MigrateUserProvider.new()
-          |> Oban.insert()
-        rescue
-          _ -> :ok
-        catch
-          _, _ -> :ok
+        if target_atom do
+          try do
+            %{"user_id" => user_id, "target_provider" => Atom.to_string(target_atom)}
+            |> Engram.Workers.MigrateUserProvider.new()
+            |> Oban.insert()
+          rescue
+            _ -> :ok
+          catch
+            _, _ -> :ok
+          end
         end
       end
-    end
 
     :ok
   end

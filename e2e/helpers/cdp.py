@@ -120,6 +120,290 @@ class CdpClient:
             f"Plugin not ready after {timeout}s on CDP port {self.port}"
         )
 
+    async def wait_for_vault_registered(self, timeout: float = 15) -> None:
+        """Poll until plugin.settings.vaultId is populated.
+
+        After plugin.onload registers the vault via /vaults/register, the
+        engine has a vaultId — required for computeSyncFingerprint, which
+        markSyncGateAccepted depends on. Returns silently on success.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                vault_id = await self.evaluate(
+                    f"{PLUGIN_PATH}.settings && {PLUGIN_PATH}.settings.vaultId"
+                )
+                if vault_id:
+                    logger.info(
+                        "Vault registered on CDP port %d: %s", self.port, vault_id
+                    )
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        raise TimeoutError(
+            f"Vault not registered after {timeout}s on CDP port {self.port}"
+        )
+
+    async def has_sync_gate(self) -> bool:
+        """True when the loaded plugin exposes the SyncPreviewModal gate API.
+
+        Older plugin builds (pre-SyncPreviewModal) lack markSyncGateAccepted /
+        setSyncBlocked entirely. The harness must stay backwards-compatible
+        with whatever plugin SHA the cross-repo trigger ships, so every
+        gate helper short-circuits when this returns False.
+        """
+        result = await self.evaluate(
+            f"typeof {PLUGIN_PATH}.markSyncGateAccepted === 'function'"
+        )
+        return result is True
+
+    async def accept_sync_gate(self) -> None:
+        """Simulate the user accepting the sync-preview modal.
+
+        Drives the same code path as a real click in SyncPreviewModal:
+        markSyncGateAccepted() persists the fingerprint and flips
+        syncBlocked=false; the open modal is then dismissed via Escape so
+        the awaiting startup flow resolves with "cancel" (a no-op now that
+        the gate has been accepted out-of-band).
+
+        Idempotent — safe to call when no modal is open. No-op against
+        plugin builds that predate the sync gate.
+        """
+        if not await self.has_sync_gate():
+            logger.info("Sync gate not present on plugin; skipping accept")
+            return
+        # markSyncGateAccepted requires a vault to be registered (it hashes
+        # apiKey + vaultId). Wait briefly so first-launch tests don't race
+        # the plugin's startup register call.
+        await self.wait_for_vault_registered()
+        await self.evaluate(
+            f"{PLUGIN_PATH}.markSyncGateAccepted().then(() => 'ok')",
+            await_promise=True,
+        )
+        # Resolve any open modal — modals listen for Escape and resolve
+        # their awaitChoice() promise with "cancel". With the gate already
+        # accepted, runSyncFromChoice("cancel") is a no-op.
+        await self.evaluate(
+            """
+            (() => {
+                const modals = document.querySelectorAll('.modal-container .modal');
+                for (const m of modals) {
+                    m.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Escape', bubbles: true,
+                    }));
+                }
+                return modals.length;
+            })()
+            """
+        )
+        logger.info("Sync gate accepted on CDP port %d", self.port)
+
+    async def reset_sync_gate(self) -> None:
+        """Put the engine back into gate-closed state (for modal-flow tests).
+
+        Clears the saved fingerprint and re-blocks the engine so the next
+        startup or saveSettings will reopen SyncPreviewModal. Mirrors the
+        production "change vault" path which resets the gate to force a
+        new direction choice. No-op against gate-less plugin builds.
+        """
+        if not await self.has_sync_gate():
+            return
+        await self.evaluate(
+            f"""
+            (() => {{
+                const p = {PLUGIN_PATH};
+                p.syncGateAcceptedFor = null;
+                p.syncEngine.setSyncBlocked(true);
+                return 'reset';
+            }})()
+            """
+        )
+        logger.info("Sync gate reset on CDP port %d", self.port)
+
+    async def is_sync_blocked(self) -> bool:
+        """Read the engine's syncBlocked flag. False when plugin lacks gate."""
+        if not await self.has_sync_gate():
+            return False
+        return await self.evaluate(f"{ENGINE_PATH}.isSyncBlocked()") is True
+
+    async def open_sync_preview_modal(self) -> None:
+        """Fire SyncPreviewModal in the background (does not await user choice).
+
+        Mirrors production calls into plugin.doSyncWithFirstSyncCheck.
+        Returns immediately — the modal stays open until a button is
+        clicked or the modal is dismissed.
+        """
+        # Note: NOT await_promise. The promise from doSyncWithFirstSyncCheck
+        # only resolves once the user picks (or cancels). Returning early
+        # lets the test poll DOM presence and then drive the interaction.
+        await self.evaluate(
+            f"void {PLUGIN_PATH}.doSyncWithFirstSyncCheck()"
+        )
+
+    async def wait_for_sync_preview_modal(self, timeout: float = 5) -> None:
+        """Poll until SyncPreviewModal is mounted in the DOM."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            present = await self.evaluate(
+                "Boolean(document.querySelector('.engram-sync-preview-modal'))"
+            )
+            if present is True:
+                return
+            await asyncio.sleep(0.1)
+        raise TimeoutError(
+            f"SyncPreviewModal not mounted after {timeout}s on CDP port {self.port}"
+        )
+
+    async def wait_for_modal_closed(self, timeout: float = 5) -> None:
+        """Poll until SyncPreviewModal is gone from the DOM."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            present = await self.evaluate(
+                "Boolean(document.querySelector('.engram-sync-preview-modal'))"
+            )
+            if present is False:
+                return
+            await asyncio.sleep(0.1)
+        raise TimeoutError(
+            f"SyncPreviewModal still mounted after {timeout}s on CDP port {self.port}"
+        )
+
+    async def get_modal_header_text(self) -> str:
+        """Read the first .engram-sync-preview-header text in the open modal."""
+        result = await self.evaluate(
+            """
+            (() => {
+                const h = document.querySelector(
+                    '.engram-sync-preview-modal .engram-sync-preview-header'
+                );
+                return h ? h.textContent : '';
+            })()
+            """
+        )
+        return result or ""
+
+    async def pick_modal_option(self, label: str) -> None:
+        """Click a SyncPreviewModal option button by its visible label.
+
+        For destructive choices the modal switches to the confirm view —
+        call click_modal_confirm() afterward to resolve.
+        """
+        escaped = json.dumps(label)
+        clicked = await self.evaluate(
+            f"""
+            (() => {{
+                const labels = document.querySelectorAll(
+                    '.engram-sync-preview-modal .engram-sync-preview-option-label'
+                );
+                for (const span of labels) {{
+                    if (span.textContent.trim() === {escaped}) {{
+                        const btn = span.closest('button');
+                        if (btn) {{ btn.click(); return true; }}
+                    }}
+                }}
+                return false;
+            }})()
+            """
+        )
+        if clicked is not True:
+            raise CdpError(f"Modal option '{label}' not found")
+
+    async def click_modal_confirm(self) -> None:
+        """Type "delete" and click the confirm button for a destructive choice.
+
+        SyncPreviewModal's confirm view requires the user to type "delete"
+        before the confirm button enables (sync-preview-modal.ts
+        renderConfirm). Drive both steps here so callers stay
+        UX-independent.
+        """
+        clicked = await self.evaluate(
+            """
+            (() => {
+                const input = document.querySelector(
+                    '.engram-sync-preview-modal .engram-sync-preview-confirm-input'
+                );
+                const btn = document.querySelector(
+                    '.engram-sync-preview-modal .engram-sync-preview-confirm-btn'
+                );
+                if (!input || !btn) return false;
+                input.value = 'delete';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                if (btn.disabled) return false;
+                btn.click();
+                return true;
+            })()
+            """
+        )
+        if clicked is not True:
+            raise CdpError("Modal confirm button not present or still disabled")
+
+    async def install_choice_spy(self, swallow: bool = False) -> None:
+        """Wrap plugin.runSyncFromChoice so tests can read the resolved choice.
+
+        When swallow=False the original method still runs (the spy is purely
+        an observer). When swallow=True the spy records the choice and
+        substitutes a no-op — useful for tests that want to verify modal
+        dispatch without performing the underlying sync (which would push,
+        pull, or delete real files).
+        """
+        swallow_js = "true" if swallow else "false"
+        await self.evaluate(
+            f"""
+            (() => {{
+                const p = {PLUGIN_PATH};
+                if (p.__origRunSyncFromChoice) return 'already-installed';
+                p.__origRunSyncFromChoice = p.runSyncFromChoice.bind(p);
+                p.__lastSyncChoice = null;
+                const swallow = {swallow_js};
+                p.runSyncFromChoice = async (choice) => {{
+                    p.__lastSyncChoice = choice;
+                    if (swallow) {{
+                        // Mirror markSyncGateAccepted's side effect so the
+                        // post-choice gate-state assertion remains valid.
+                        if (choice !== 'cancel' && choice !== 'change-vault') {{
+                            await p.markSyncGateAccepted();
+                        }}
+                        return choice !== 'cancel' && choice !== 'change-vault';
+                    }}
+                    return p.__origRunSyncFromChoice(choice);
+                }};
+                return 'installed';
+            }})()
+            """
+        )
+
+    async def uninstall_choice_spy(self) -> None:
+        """Remove the spy installed by install_choice_spy()."""
+        await self.evaluate(
+            f"""
+            (() => {{
+                const p = {PLUGIN_PATH};
+                if (!p.__origRunSyncFromChoice) return 'not-installed';
+                p.runSyncFromChoice = p.__origRunSyncFromChoice;
+                delete p.__origRunSyncFromChoice;
+                delete p.__lastSyncChoice;
+                return 'removed';
+            }})()
+            """
+        )
+
+    async def get_last_sync_choice(self) -> str | None:
+        """Read the choice recorded by install_choice_spy(), if any."""
+        return await self.evaluate(f"{PLUGIN_PATH}.__lastSyncChoice")
+
+    async def reload_plugin(self) -> None:
+        """Disable and re-enable engram-vault-sync to simulate plugin reload."""
+        await self.evaluate(
+            'app.plugins.disablePlugin("engram-vault-sync").then(() => "off")',
+            await_promise=True,
+        )
+        await self.evaluate(
+            'app.plugins.enablePlugin("engram-vault-sync").then(() => "on")',
+            await_promise=True,
+        )
+        await self.wait_for_plugin_ready(timeout=15)
+
     async def trigger_full_sync(self) -> dict:
         """Call syncEngine.fullSync() and return {pulled, pushed}."""
         result = await self.evaluate(
@@ -154,6 +438,22 @@ class CdpClient:
         """Check if the plugin's real-time stream (WebSocket channel) is connected."""
         result = await self.evaluate(f"{PLUGIN_PATH}.isLiveConnected()")
         return result is True
+
+    async def wait_for_stream_connected(self, timeout: float = 10) -> None:
+        """Poll until the WebSocket channel reports connected.
+
+        Use at the top of tests that rely on live propagation — the channel
+        can take a beat to (re)connect after fixture setup or after a
+        preceding test reset state.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await self.check_stream_connected():
+                return
+            await asyncio.sleep(0.5)
+        raise TimeoutError(
+            f"Stream not connected after {timeout}s on CDP port {self.port}"
+        )
 
 
     async def set_conflict_resolution(self, mode: str) -> None:
@@ -378,6 +678,26 @@ class CdpClient:
         """Clear the offline queue (for test isolation)."""
         await self.evaluate(f"{ENGINE_PATH}.queue.entries.clear()")
         logger.info("Queue cleared on CDP port %d", self.port)
+
+    async def persist_plugin_data(self) -> None:
+        """Synchronously flush settings + queue + sync state to data.json.
+
+        The plugin debounces writes by default; tests that hard-kill the
+        Obsidian process (test_31 restart) need to force a flush so all
+        on-disk state survives the crash. Drives the plugin's own
+        savePluginData so the payload never drifts from what the plugin
+        actually persists (private in TS, accessible at runtime).
+        """
+        await self.evaluate(
+            """
+            (async () => {
+                const p = app.plugins.plugins['engram-vault-sync'];
+                await p.savePluginData(p.syncEngine.getLastSync());
+                return 'saved';
+            })()
+            """,
+            await_promise=True,
+        )
 
     async def get_offline_status(self) -> bool:
         """Read whether the engine is in offline mode."""

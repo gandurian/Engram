@@ -1668,3 +1668,166 @@ jobs:
           done
 
           echo "FastRaid deploy verified — both engram containers running ${VERSION}"
+
+  # Auto-open a PR in engram-app/engram-infra bumping the staging-fastraid
+  # image tag(s) to the just-deployed version. Third leg of the TF-via-
+  # daemon control plane: release → /deploy (live container bumped) →
+  # infra PR → TF apply via daemon (state catches up).
+  #
+  # As of 2026-05-19 the full chain is live: engram-deployer 0.1.7 on
+  # FastRaid with /tf-apply + /tf-plan + engram-infra's tf-apply.yml +
+  # tf-plan.yml + docker_container.engram_saas in TF state (PR #30).
+  # The /tf-plan bot upserts a plan comment on every push; /tf-apply
+  # runs only on merge to main. `/deploy` is still the live-mover.
+  #
+  # Future: once selfhost lands under TF (Path E.3b), the regex below
+  # picks up `engram_selfhost_image_tag` too and the bump covers both.
+  # Eventually /deploy can be retired entirely and TF apply becomes
+  # the sole image-bump path.
+  bump-infra-tfvars:
+    needs: deploy-fastraid
+    if: |
+      always()
+      && needs.deploy-fastraid.result == 'success'
+      && github.ref == 'refs/heads/main'
+      && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # Generates a short-lived installation token for the engram-infra-tf
+      # GitHub App, scoped to engram-app/engram-infra only. The App's PEM
+      # already lives in this repo's secrets (set manually — chicken-egg
+      # with TF authenticating using it).
+      #
+      # Required App permissions on engram-infra:
+      #   - contents: read & write  (push branch)
+      #   - pull-requests: read & write  (open PR)
+      # Adjust at https://github.com/organizations/engram-app/settings/apps/engram-infra-tf
+      # if this step 403s.
+      - name: Generate engram-infra App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: engram-app
+          repositories: engram-infra
+
+      - name: Re-extract version (job-isolated)
+        id: version
+        run: |
+          # deploy-fastraid produces VERSION as a job output, but jobs can
+          # only pass outputs through `needs.<job>.outputs.*` — which means
+          # the source job has to declare them upstream. Easier to re-read
+          # mix.exs here; we know the deploy already succeeded with this
+          # exact version.
+          git clone --depth 1 https://github.com/${{ github.repository }} repo
+          cd repo
+          git fetch --depth 1 origin ${{ github.sha }}
+          git checkout ${{ github.sha }}
+          VERSION=$(grep 'version:' mix.exs | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: Invalid semver in mix.exs: '$VERSION'" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bumping engram-infra to ${VERSION}"
+
+      - name: Checkout engram-infra
+        uses: actions/checkout@v6
+        with:
+          repository: engram-app/engram-infra
+          token: ${{ steps.app-token.outputs.token }}
+          path: engram-infra
+          ref: main
+
+      - name: Rewrite image_tag defaults in variables.tf
+        id: rewrite
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Python rewrite anchored on the variable block names — robust
+          # against other `default = ` lines being added later in the file.
+          # Matches engram_saas_image_tag today and engram_selfhost_image_tag
+          # once selfhost is imported into TF (Path E.3b). saas and selfhost
+          # share the same image so the bump always moves them together;
+          # accepting either 1 or 2 matches lets this work before AND after
+          # the selfhost import. Hard-fail on 0 or 3+ (variables.tf shape
+          # changed — investigate).
+          #
+          # If variables.tf is absent (Path E.3 was reverted 2026-05-19 due
+          # to /deploy SHA-churn; will return once engram PR #157 makes
+          # tf-apply the sole image-mover) emit `bumped=false` and exit
+          # clean. The bump step downstream is gated on `bumped=true` so
+          # this job becomes a no-op until TF state catches up.
+          python3 - <<'PY'
+          import os
+          import re
+
+          path = "engram-infra/main/envs/staging-fastraid/variables.tf"
+          version = os.environ["VERSION"]
+          gh_output = os.environ["GITHUB_OUTPUT"]
+
+          if not os.path.exists(path):
+              print(f"::notice::{path} not present — Path E.3 not yet re-imported; bump skipped")
+              with open(gh_output, "a") as f:
+                  f.write("bumped=false\n")
+              raise SystemExit(0)
+
+          text = open(path).read()
+          pattern = re.compile(
+              r'(variable\s+"engram_(?:saas|selfhost)_image_tag"[^}]*?default\s*=\s*)"[^"]+"',
+              re.DOTALL,
+          )
+          new, count = pattern.subn(rf'\g<1>"{version}"', text)
+          if count not in (1, 2):
+              raise SystemExit(
+                  f"expected 1 or 2 variable blocks to update, got {count}; "
+                  "variables.tf shape changed — adjust the regex"
+              )
+          open(path, "w").write(new)
+          with open(gh_output, "a") as f:
+              f.write("bumped=true\n")
+          print(f"rewrote {count} block(s) to {version}")
+          PY
+
+          if [ -f engram-infra/main/envs/staging-fastraid/variables.tf ]; then
+            echo "::group::variables.tf after rewrite"
+            cat engram-infra/main/envs/staging-fastraid/variables.tf
+            echo "::endgroup::"
+          fi
+
+      - name: Open / update PR in engram-infra
+        if: steps.rewrite.outputs.bumped == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: engram-infra
+          token: ${{ steps.app-token.outputs.token }}
+          branch: bot/bump-engram-staging-fastraid
+          delete-branch: true
+          commit-message: |
+            chore(staging-fastraid): bump engram image to ${{ steps.version.outputs.version }}
+
+            Automated bump from engram-app/Engram release.
+          title: "chore(staging-fastraid): bump engram image to ${{ steps.version.outputs.version }}"
+          body: |
+            Automated bump from engram-app/Engram release.
+
+            Source commit: ${{ github.repository }}@${{ github.sha }}
+
+            Bumps `engram_saas_image_tag` (and `engram_selfhost_image_tag` once selfhost is imported into TF via Path E.3b) from current default to **${{ steps.version.outputs.version }}**.
+
+            ## What this triggers
+
+            On merge, `.github/workflows/tf-apply.yml` POSTs the merge SHA to engram-deployer's `/tf-apply` endpoint on FastRaid. The daemon runs `terraform apply` against the local Docker socket, recreating the engram-saas container with the new image. `/tf-plan` upserts a plan comment as part of the PR review gate (live since 2026-05-18).
+
+            The `/deploy` POST from the source release already moved the live container. This PR brings TF state into sync — expect plan output to be a single `~ image` field change on `docker_container.engram_saas`.
+
+            ## Review
+
+            Auto-generated; if `variables.tf` has any non-image diff, treat as a regex regression and investigate before merging.
+          labels: |
+            automated
+            tf-image-bump

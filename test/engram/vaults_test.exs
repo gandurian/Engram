@@ -557,4 +557,55 @@ defmodule Engram.VaultsTest do
              "expected ascending id order across 3-way tie, got #{inspect(ids)}"
     end
   end
+
+  describe "pricing v2 §J — vault_count telemetry" do
+    setup %{user: user} do
+      # Default Free tier allows 1 vault; raise the cap so multi-vault test paths
+      # don't hit :vault_limit_reached.
+      insert(:user_limit_override, user: user, key: "vaults_cap", value: %{"v" => 5})
+
+      ref = :telemetry_test.attach_event_handlers(self(), [[:engram, :abuse, :vault_count]])
+      on_exit(fn -> :telemetry.detach(ref) end)
+      :ok
+    end
+
+    test "emits :vault_count on create_vault success", %{user: user} do
+      assert {:ok, _} = Vaults.create_vault(user, %{name: "V1"})
+
+      assert_received {[:engram, :abuse, :vault_count], _ref, %{count: 1},
+                       %{user_id: uid, op: :created}}
+
+      assert uid == user.id
+
+      assert {:ok, _} = Vaults.create_vault(user, %{name: "V2"})
+      assert_received {[:engram, :abuse, :vault_count], _, %{count: 2}, %{op: :created}}
+    end
+
+    test "emits :vault_count on delete_vault success", %{user: user} do
+      {:ok, v} = Vaults.create_vault(user, %{name: "V1"})
+      drain_vault_count_messages()
+
+      assert {:ok, _} = Vaults.delete_vault(user, v.id)
+
+      assert_received {[:engram, :abuse, :vault_count], _ref, %{count: 0},
+                       %{user_id: uid, op: :deleted}}
+
+      assert uid == user.id
+    end
+
+    test "emits :vault_count on register_vault when newly created", %{user: user} do
+      assert {:ok, _, :created} = Vaults.register_vault(user, "Reg", "client-xyz")
+
+      assert_received {[:engram, :abuse, :vault_count], _, %{count: 1},
+                       %{user_id: _, op: :created}}
+    end
+  end
+
+  defp drain_vault_count_messages do
+    receive do
+      {[:engram, :abuse, :vault_count], _, _, _} -> drain_vault_count_messages()
+    after
+      0 -> :ok
+    end
+  end
 end

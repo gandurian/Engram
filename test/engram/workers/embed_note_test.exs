@@ -110,6 +110,33 @@ defmodule Engram.Workers.EmbedNoteTest do
       assert {:discard, _} = perform_job(EmbedNote, %{note_id: 999_999})
     end
 
+    # Voyage rate-limit (429) must not burn an Oban attempt. Five 429s in a
+    # row would otherwise discard the job (see handoff
+    # 2026-05-24-embed-rate-limit-defenses.md: 1167 discards from free-tier
+    # 3-RPM bucket).
+    test "snoozes job when Voyage returns 429 rate-limit error", %{bypass: bypass, note: note} do
+      stub_qdrant(bypass)
+
+      Engram.MockEmbedder
+      |> expect(:embed_texts, fn _texts ->
+        {:error, {429, %{"detail" => "rate limit exceeded"}}}
+      end)
+
+      assert {:snooze, 60} = perform_job(EmbedNote, %{note_id: note.id})
+    end
+
+    test "returns {:error, _} for non-429 embed failures (preserves retry behavior)",
+         %{bypass: bypass, note: note} do
+      stub_qdrant(bypass)
+
+      Engram.MockEmbedder
+      |> expect(:embed_texts, fn _texts ->
+        {:error, {500, %{"detail" => "internal error"}}}
+      end)
+
+      assert {:error, {500, _}} = perform_job(EmbedNote, %{note_id: note.id})
+    end
+
     test "discards job when note is soft-deleted", %{user: user} do
       note = insert(:note, user: user, deleted_at: DateTime.utc_now())
       assert {:discard, _} = perform_job(EmbedNote, %{note_id: note.id})

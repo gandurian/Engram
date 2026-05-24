@@ -81,6 +81,13 @@ if config_env() != :test do
     config :engram, :query_embed_model, query_model
   end
 
+  # Voyage 429 → snooze duration (seconds). Tune as Voyage RPM grows: lower
+  # values churn jobs faster once budget is restored; higher values are gentler
+  # on a small bucket. Default 60s suits both free-tier (3 RPM) and paid.
+  if secs = System.get_env("EMBED_429_SNOOZE_SECONDS") do
+    config :engram, :embed_429_snooze_seconds, String.to_integer(secs)
+  end
+
   if System.get_env("QDRANT_URL") do
     config :engram, :qdrant_url, System.get_env("QDRANT_URL")
   end

@@ -22,6 +22,12 @@ defmodule Engram.Embedders.Voyage do
 
   @impl true
   def embed_texts(texts, opts) when is_list(texts) do
+    with :ok <- throttle_check() do
+      do_embed_texts(texts, opts)
+    end
+  end
+
+  defp do_embed_texts(texts, opts) do
     url = Application.get_env(:engram, :voyage_url, @default_url)
     model = Keyword.get(opts, :model, Application.get_env(:engram, :embed_model, @default_model))
 
@@ -53,6 +59,39 @@ defmodule Engram.Embedders.Voyage do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Client-side rate limit. Enabled when `:voyage_rpm` is set (env: VOYAGE_RPM).
+  # When the bucket is empty we synthesize the same `{:error, {429, body}}`
+  # shape Voyage returns on a real rate-limit response, so callers (notably
+  # `Engram.Workers.EmbedNote`) handle both paths identically — the
+  # snooze-on-429 logic fires for either case.
+  #
+  # Bucket key is `:voyage_throttle_key` (default "voyage_embed") so tests can
+  # use per-test keys to avoid collisions on the shared ETS limiter table.
+  defp throttle_check do
+    case Application.get_env(:engram, :voyage_rpm) do
+      nil ->
+        :ok
+
+      rpm when is_integer(rpm) and rpm > 0 ->
+        key = Application.get_env(:engram, :voyage_throttle_key, "voyage_embed")
+
+        case EngramWeb.RateLimiter.hit(key, 60_000, rpm) do
+          {:allow, _count} ->
+            :ok
+
+          {:deny, retry_after_ms} ->
+            :telemetry.execute(
+              [:engram, :embed, :client_rate_limited],
+              %{count: 1, retry_after_ms: retry_after_ms},
+              %{rpm: rpm}
+            )
+
+            {:error,
+             {429, %{"detail" => "client_rate_limited", "retry_after_ms" => retry_after_ms}}}
+        end
     end
   end
 end

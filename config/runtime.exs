@@ -81,6 +81,14 @@ if config_env() != :test do
     config :engram, :query_embed_model, query_model
   end
 
+  # Client-side Voyage rate limit. Unset = no throttle (self-host default).
+  # Set to your Voyage paid-tier RPM (e.g. 2000) to fail fast with a synthetic
+  # 429 before burning real API calls. EmbedNote snoozes on the synthetic 429
+  # just like a real one. Bump this as the Voyage allotment grows.
+  if rpm = System.get_env("VOYAGE_RPM") do
+    config :engram, :voyage_rpm, String.to_integer(rpm)
+  end
+
   if System.get_env("QDRANT_URL") do
     config :engram, :qdrant_url, System.get_env("QDRANT_URL")
   end

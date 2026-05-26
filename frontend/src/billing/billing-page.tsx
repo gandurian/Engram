@@ -4,6 +4,7 @@ import { useBillingStatus, useBillingConfig, type BillingConfig } from '../api/q
 import { api } from '../api/client'
 
 const TIER_LABELS = {
+  free: 'Free',
   none: 'No Plan',
   trial: 'Free Trial',
   starter: 'Starter',
@@ -30,7 +31,7 @@ export default function BillingPage() {
     return <p className="text-gray-500 dark:text-gray-400">Loading billing info...</p>
   }
 
-  const needsSubscription = billing.tier === 'none'
+  const needsSubscription = !billing.active
   const isTrial = billing.subscription?.status === 'trialing'
   const checkoutReady = Boolean(paddle && config)
 

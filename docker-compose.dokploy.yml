@@ -1,0 +1,79 @@
+# Engram self-host — Dokploy compose (Ideaverse vault)
+# Self-contained: Postgres + dedicated Qdrant + bundled Ollama embeddings.
+# The `engram` service builds from the engram repo source (build context = repo root),
+# so this file must live INSIDE a fork of github.com/engram-app/engram.
+services:
+  engram:
+    build: .
+    restart: unless-stopped
+    environment:
+      PHX_HOST: engram.gandurian.com
+      PORT: "4000"
+      DATABASE_URL: postgresql://engram:${POSTGRES_PASSWORD}@postgres:5432/engram
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET: ${JWT_SECRET}
+      RELEASE_COOKIE: ${RELEASE_COOKIE}
+      # Embeddings — local Ollama (privacy: content never leaves the VPS)
+      EMBED_BACKEND: ollama
+      EMBED_MODEL: nomic-embed-text
+      EMBED_DIMS: "768"
+      OLLAMA_URL: http://ollama:11434
+      # Vector DB — dedicated Qdrant for this stack
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: obsidian_notes
+      # Attachments in Postgres — no S3/MinIO needed (50MB vault, fine)
+      STORAGE_BACKEND: database
+      # SECURITY: flip to "false" right after creating your account
+      REGISTRATION_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+    expose:
+      - "4000"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: engram
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: engram
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engram"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # One-shot: pulls the embedding model into the ollama volume on first deploy
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/sh", "-c", "sleep 8 && ollama pull nomic-embed-text"]
+    restart: "no"
+
+volumes:
+  pg_data:
+  qdrant_data:
+  ollama_data:

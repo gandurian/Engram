@@ -13,9 +13,8 @@ FROM oven/bun:1.2 AS frontend
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/bun.lock ./
-# Bun global package cache survives across builds on self-hosted runners.
-RUN --mount=type=cache,target=/root/.bun/install/cache,id=bun-cache \
-    bun install --frozen-lockfile
+# Cache mount removed: was hanging on Dokploy buildkit. Trade slower cold builds for reliability.
+RUN bun install --frozen-lockfile
 COPY frontend/ ./
 RUN bun run build
 

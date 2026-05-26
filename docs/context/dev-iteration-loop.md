@@ -93,6 +93,60 @@ machine) and sign in via Clerk.
 - Connect by **IP**, not a hostname — Vite's `allowedHosts` permits IP literals but
   blocks unknown domain names ("Blocked request. This host is not allowed.").
 
+### Sharing the browser view with the AI (CDP over reverse tunnel)
+
+_Added 2026-05-26._
+
+Problem: you're on a laptop SSH'd into this VM, viewing the Vite page in your
+**laptop** browser. The `chrome-devtools` MCP, by default, drives a *separate*
+headless-ish Chromium running **on the VM** (port `9224`) — so the AI and you are
+looking at two different browsers. To co-drive **the exact tab you're watching**,
+expose your laptop Chrome's CDP to the VM and point the MCP at it.
+
+**Steps that worked:**
+
+1. **Laptop** — fully quit Chrome first (or the debug flag is silently ignored
+   and it just opens a tab in the running instance), then launch pinned to a
+   throwaway profile:
+   ```
+   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/engram-cdp http://10.0.20.172:5173
+   ```
+2. **Laptop** — reverse-forward that CDP port into the VM (add `-R` to your
+   existing SSH session or open a second one):
+   ```
+   ssh -R 9222:localhost:9222 <this-vm>
+   ```
+3. **VM** — confirm the tunnel reaches your laptop browser:
+   ```
+   curl -s --max-time 2 http://localhost:9222/json/version    # Browser: Chrome/...
+   curl -s http://localhost:9222/json/list                    # should list YOUR tab
+   ```
+4. **Point the MCP at it.** `~/.claude.json` → `mcpServers.chrome-devtools.args`
+   carries `--browserUrl=http://127.0.0.1:<port>`. Set it to the tunnel port,
+   then reconnect the server (`/mcp` → chrome-devtools → reconnect). Verify with
+   the MCP `list_pages` — it should show **only** your laptop tab.
+
+**Gotchas / why it's fiddly:**
+
+- **CDP binds localhost only.** `--remote-debugging-port` never listens on the
+  LAN, by design. The reverse SSH tunnel is mandatory; do **not** try to expose
+  9222 on `0.0.0.0` — it won't, and you shouldn't (unauthenticated full browser
+  control).
+- **Port collision with the VM's own debug Chrome.** A persistent Chromium runs
+  on the VM at **`9224`** (that's the MCP's default `--browserUrl`). You therefore
+  cannot reverse-tunnel *onto* 9224 (address in use). Two clean options:
+  - **Repoint the MCP** to the tunnel port (e.g. `9222`) + reconnect. Simplest
+    per-session; **remember to revert `--browserUrl` to `9224`** afterward (or
+    your next solo session attaches to a dead tunnel).
+  - **Free `9224`** (stop the VM-local Chromium) and tunnel your laptop onto
+    `9224` instead — zero config edit, but kills whatever else uses that browser.
+- **Recommended convention:** dedicate **`9222` = "the shared/laptop tab"** and
+  leave `9224` = "VM-local solo browser". Flip `--browserUrl` between them per
+  session. (If we end up sharing often, standardize the MCP on `9222`
+  permanently and run the VM-local browser there too.)
+- Confirm the tunnel listens on both `127.0.0.1:9222` and `[::1]:9222`
+  (`ss -ltn | grep 9222`); the MCP uses `127.0.0.1`, so IPv4 is what matters.
+
 ### Failed approaches / dead ends
 
 - **`bun run dev` against a remote https target → 502.** This VM has no IPv6
